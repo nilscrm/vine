@@ -1,0 +1,16 @@
+
+::main { ::add_ref::main }
+
+::add_ref::main {
+  fn(ref(w1 w1) _)
+  ::add_ref = fn(ref(1 _) fn(ref(2 w11) ref(w15 w19)))
+  ::std::numeric::N32::add::add = fn(w15 fn(w11 w19))
+}
+
+::std::numeric::N32::add::add { fn(@n32_add(n0 n1) fn(n0 n1)) }
+
+::add_ref {
+  fn(ref(w1 w12) fn(ref(dup16(w3 w8) w3) ref(w10 w12)))
+  ::std::numeric::N32::add::add = fn(w1 fn(w8 w10))
+}
+

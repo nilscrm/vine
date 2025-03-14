@@ -3,7 +3,7 @@ use std::{
   mem::take,
 };
 
-use crate::ast::{Net, Tree};
+use crate::ast::{Net, Tree, TreeNode};
 
 impl Net {
   /// Apply eta-reduction rules to every net; replacing `(_ _)` with `_` and
@@ -41,11 +41,11 @@ struct WalkTrees<'a> {
 
 impl<'a> WalkTrees<'a> {
   fn walk_tree(&mut self, tree: &'a Tree) {
-    let kind = match tree {
-      Tree::Erase => NodeKind::Erase,
-      Tree::N32(n) => NodeKind::N32(*n),
-      Tree::F32(n) => NodeKind::F32(*n),
-      Tree::Var(v) => match self.vars.entry(v) {
+    let kind = match &tree.tree_node {
+      TreeNode::Erase => NodeKind::Erase,
+      TreeNode::N32(n) => NodeKind::N32(*n),
+      TreeNode::F32(n) => NodeKind::F32(*n),
+      TreeNode::Var(v) => match self.vars.entry(v) {
         Entry::Occupied(e) => {
           let i = e.remove() as isize;
           let j = self.nodes.len() as isize;
@@ -57,7 +57,7 @@ impl<'a> WalkTrees<'a> {
           NodeKind::Hole
         }
       },
-      Tree::Comb(l, ..) => NodeKind::Comb(l.clone()),
+      TreeNode::Comb(l, ..) => NodeKind::Comb(l.clone()),
       _ => NodeKind::Other,
     };
     self.nodes.push(kind);
@@ -79,7 +79,7 @@ impl<'a> ReduceTrees<'a> {
     let index = self.index;
     self.index += 1;
     let kind = &self.nodes[index];
-    if let Tree::Comb(_, a, b) = tree {
+    if let TreeNode::Comb(_, a, b) = &mut tree.tree_node {
       let ak = self.reduce_tree(a);
       let bk = self.reduce_tree(b);
       if ak == bk {

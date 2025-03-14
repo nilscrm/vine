@@ -9,7 +9,7 @@ use ivm::{
 use vine_util::parser::{Parser, ParserState};
 
 use crate::{
-  ast::Tree,
+  ast::{Tree, TreeNode},
   host::Host,
   parser::{IvyParser, ParseError},
 };
@@ -40,14 +40,14 @@ impl<'host, 'ctx, 'ivm, 'ext> Repl<'host, 'ctx, 'ivm, 'ext> {
   }
 
   pub fn exec_pair(&mut self, pair: (Tree, Tree)) {
-    let p = self.inject(pair.0);
-    let q = self.inject(pair.1);
+    let p = self.inject(pair.0.tree_node);
+    let q = self.inject(pair.1.tree_node);
     self.ivm.link(p, q);
     self.ivm.normalize();
   }
 
-  fn inject_to(&mut self, tree: Tree, to: Wire<'ivm>) {
-    if let Tree::Var(v) = tree {
+  fn inject_to(&mut self, tree: TreeNode, to: Wire<'ivm>) {
+    if let TreeNode::Var(v) = tree {
       match self.vars.entry(v) {
         Entry::Occupied(e) => {
           let p = e.shift_remove();
@@ -63,36 +63,36 @@ impl<'host, 'ctx, 'ivm, 'ext> Repl<'host, 'ctx, 'ivm, 'ext> {
     }
   }
 
-  fn inject(&mut self, tree: Tree) -> Port<'ivm> {
+  fn inject(&mut self, tree: TreeNode) -> Port<'ivm> {
     match tree {
-      Tree::Erase => Port::ERASE,
-      Tree::N32(value) => Port::new_ext_val(self.host.new_n32(value)),
-      Tree::F32(value) => Port::new_ext_val(self.host.new_f32(value)),
-      Tree::Global(name) => Port::new_global(self.host.get(&name).unwrap()),
-      Tree::Comb(label, a, b) => {
+      TreeNode::Erase => Port::ERASE,
+      TreeNode::N32(value) => Port::new_ext_val(self.host.new_n32(value)),
+      TreeNode::F32(value) => Port::new_ext_val(self.host.new_f32(value)),
+      TreeNode::Global(name) => Port::new_global(self.host.get(&name).unwrap()),
+      TreeNode::Comb(label, a, b) => {
         let label = self.host.label_to_u16(label);
         let n = unsafe { self.ivm.new_node(Tag::Comb, label) };
-        self.inject_to(*a, n.1);
-        self.inject_to(*b, n.2);
+        self.inject_to(a.tree_node, n.1);
+        self.inject_to(b.tree_node, n.2);
         n.0
       }
-      Tree::ExtFn(f, swap, a, b) => {
+      TreeNode::ExtFn(f, swap, a, b) => {
         let f = self.host.instantiate_ext_fn(&f, swap);
         let n = unsafe { self.ivm.new_node(Tag::ExtFn, f.bits()) };
-        self.inject_to(*a, n.1);
-        self.inject_to(*b, n.2);
+        self.inject_to(a.tree_node, n.1);
+        self.inject_to(b.tree_node, n.2);
         n.0
       }
-      Tree::Branch(z, p, o) => {
+      TreeNode::Branch(z, p, o) => {
         let n = unsafe { self.ivm.new_node(Tag::Branch, 0) };
         let m = unsafe { self.ivm.new_node(Tag::Branch, 0) };
         self.ivm.link_wire(n.1, m.0);
-        self.inject_to(*z, m.1);
-        self.inject_to(*p, m.2);
-        self.inject_to(*o, n.2);
+        self.inject_to(z.tree_node, m.1);
+        self.inject_to(p.tree_node, m.2);
+        self.inject_to(o.tree_node, n.2);
         n.0
       }
-      Tree::Var(v) => match self.vars.entry(v) {
+      TreeNode::Var(v) => match self.vars.entry(v) {
         Entry::Occupied(e) => e.shift_remove(),
         Entry::Vacant(e) => {
           let (a, b) = self.ivm.new_wire();
@@ -100,7 +100,7 @@ impl<'host, 'ctx, 'ivm, 'ext> Repl<'host, 'ctx, 'ivm, 'ext> {
           Port::new_wire(b)
         }
       },
-      Tree::BlackBox(t) => self.inject(*t),
+      TreeNode::BlackBox(t) => self.inject(t.tree_node),
     }
   }
 }

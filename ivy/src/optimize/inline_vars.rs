@@ -3,7 +3,7 @@ use std::{
   mem::take,
 };
 
-use crate::ast::{Net, Tree};
+use crate::ast::{Net, Tree, TreeNode};
 
 #[derive(Debug, Default)]
 pub(super) struct InlineVars {
@@ -16,7 +16,8 @@ impl InlineVars {
   pub fn apply(&mut self, net: &mut Net) {
     net.pairs.retain_mut(|pair| loop {
       match pair {
-        (Tree::Var(v), t) | (t, Tree::Var(v)) => {
+        (Tree { ty: _, tree_node: TreeNode::Var(v) }, t)
+        | (t, Tree { ty: _, tree_node: TreeNode::Var(v) }) => {
           let v = take(v);
           let t = take(t);
           match self.mappings.entry(v) {
@@ -24,12 +25,13 @@ impl InlineVars {
               e.insert(t);
               break false;
             }
-            Entry::Occupied(e) => {
-              *pair = (e.remove(), t);
-            }
+            Entry::Occupied(e) => *pair = (e.remove(), t),
           }
         }
-        (Tree::Erase, Tree::Erase) => break false,
+        (
+          Tree { ty: _, tree_node: TreeNode::Erase },
+          Tree { ty: _, tree_node: TreeNode::Erase },
+        ) => break false,
         _ => break true,
       }
     });
@@ -42,7 +44,7 @@ impl InlineVars {
   }
 
   fn apply_tree(&mut self, tree: &mut Tree) {
-    while let Tree::Var(var) = tree {
+    while let TreeNode::Var(var) = &tree.tree_node {
       let Some(new) = self.mappings.remove(var) else { break };
       *tree = new;
     }

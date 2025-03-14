@@ -7,7 +7,10 @@ use ivm::{
   IVM,
 };
 
-use crate::{ast::Tree, host::Host};
+use crate::{
+  ast::{Tree, TreeNode},
+  host::Host,
+};
 
 impl<'ivm> Host<'ivm> {
   pub fn read<'ext>(&self, ivm: &IVM<'ivm, 'ext>, port: &Port<'ivm>) -> Tree {
@@ -32,6 +35,10 @@ impl<'ctx, 'ivm, 'ext> Reader<'ctx, 'ivm, 'ext> {
   }
 
   pub fn read_port(&mut self, p: &Port<'ivm>) -> Tree {
+    Tree { ty: None, tree_node: self.read_port_node(p) }
+  }
+
+  fn read_port_node(&mut self, p: &Port<'ivm>) -> TreeNode {
     let p = self.ivm.follow_ref(p);
     match p.tag() {
       Tag::Wire => {
@@ -44,24 +51,24 @@ impl<'ctx, 'ivm, 'ext> Reader<'ctx, 'ivm, 'ext> {
             n
           }
         };
-        Tree::Var(format!("n{n}"))
+        TreeNode::Var(format!("n{n}"))
       }
-      Tag::Global => Tree::Global(unsafe { p.as_global() }.name.clone()),
-      Tag::Erase => Tree::Erase,
+      Tag::Global => TreeNode::Global(unsafe { p.as_global() }.name.clone()),
+      Tag::Erase => TreeNode::Erase,
       Tag::ExtVal => {
         let val = unsafe { p.as_ext_val() };
         let ext_ty_name = self.host.reverse_ext_tys.get(&val.ty()).unwrap();
         match ext_ty_name.as_str() {
-          "N32" => Tree::N32(val.payload()),
-          "F32" => Tree::F32(f32::from_bits(val.payload())),
-          "IO" => Tree::Var("#io".into()),
-          name => Tree::Var(format!("#{}", name)),
+          "N32" => TreeNode::N32(val.payload()),
+          "F32" => TreeNode::F32(f32::from_bits(val.payload())),
+          "IO" => TreeNode::Var("#io".into()),
+          name => TreeNode::Var(format!("#{}", name)),
         }
       }
       Tag::Comb => {
         let label = p.label();
         let (p1, p2) = unsafe { p.aux_ref() };
-        Tree::Comb(
+        TreeNode::Comb(
           self.host.label_from_u16(label).to_owned(),
           self.read_wire(&p1),
           self.read_wire(&p2),
@@ -75,7 +82,7 @@ impl<'ctx, 'ivm, 'ext> Reader<'ctx, 'ivm, 'ext> {
         }
         let f_name = self.host.reverse_ext_fns.get(&f).unwrap();
         let (p1, p2) = unsafe { p.aux_ref() };
-        Tree::ExtFn(f_name.clone(), swapped, self.read_wire(&p1), self.read_wire(&p2))
+        TreeNode::ExtFn(f_name.clone(), swapped, self.read_wire(&p1), self.read_wire(&p2))
       }
       Tag::Branch => {
         let (p1, p2) = unsafe { p.aux_ref() };
@@ -83,7 +90,7 @@ impl<'ctx, 'ivm, 'ext> Reader<'ctx, 'ivm, 'ext> {
         let p1 = self.ivm.follow_ref(&p1);
         assert_eq!(p1.tag(), Tag::Branch);
         let (p11, p12) = unsafe { p1.aux_ref() };
-        Tree::Branch(self.read_wire(&p11), self.read_wire(&p12), self.read_wire(&p2))
+        TreeNode::Branch(self.read_wire(&p11), self.read_wire(&p12), self.read_wire(&p2))
       }
     }
   }

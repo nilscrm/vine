@@ -1,0 +1,8 @@
+::main {
+  @io_print_char(res @io_print_char(10 @io_flush(0 _)))
+  ::inc_ref = fn(ref(51 x) @n32_add(x res))
+}
+
+::inc_ref {
+  fn(ref(@n32_add(1 dup(x1 x2)) x1) x2)
+}

@@ -1,11 +1,14 @@
 use std::{fs, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::{Args, Parser};
 use rustyline::DefaultEditor;
 
 use ivm::{ext::Extrinsics, heap::Heap, IVM};
-use ivy::{host::Host, parser::IvyParser, repl::Repl};
+use ivy::{
+  flow_analysis::FlowAnalysis, host::Host, parser::IvyParser, repl::Repl, type_check::TypeChecker,
+  type_inference::TypeInference,
+};
 
 use crate::{Optimizations, RunArgs};
 
@@ -40,7 +43,10 @@ pub struct IvyRunCommand {
 impl IvyRunCommand {
   pub fn execute(self) -> Result<()> {
     let src_contents = fs::read_to_string(self.src.clone())?;
-    let nets = IvyParser::parse(&src_contents).unwrap();
+    let mut nets = IvyParser::parse(&src_contents).map_err(|err| anyhow!(format!("{:?}", err)))?;
+    TypeInference::infer_types(&mut nets);
+    TypeChecker::type_check(&nets)?;
+    FlowAnalysis::analyze_nets(&nets)?;
     self.run_args.run(nets);
     Ok(())
   }

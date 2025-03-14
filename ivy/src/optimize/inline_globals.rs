@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::{Net, Nets, Tree};
+use crate::ast::{Net, Nets, Tree, TreeNode};
 
 /// Inline any globals defined to be single-node nets.
 pub fn inline_globals(nets: &mut Nets) -> bool {
@@ -24,7 +24,7 @@ impl Inliner {
   fn populate_candidates(&mut self, nets: &Nets) {
     for (name, mut net) in nets.iter() {
       if net.should_inline() {
-        while let Tree::Global(name) = &net.root {
+        while let TreeNode::Global(name) = &net.root.tree_node {
           let referenced = &nets[name];
           if referenced.should_inline() {
             net = referenced;
@@ -38,7 +38,7 @@ impl Inliner {
   }
 
   fn process(&mut self, tree: &mut Tree) {
-    if let Tree::Global(name) = tree {
+    if let TreeNode::Global(name) = &mut tree.tree_node {
       if let Some(inlined) = self.candidates.get(name) {
         *tree = inlined.clone();
         self.inlined = true;
@@ -59,10 +59,16 @@ impl Net {
 
 impl Tree {
   fn is_nilary(&self) -> bool {
+    self.tree_node.is_nilary()
+  }
+}
+
+impl TreeNode {
+  fn is_nilary(&self) -> bool {
     match self {
-      Tree::Erase | Tree::N32(_) | Tree::F32(_) | Tree::Global(_) => true,
-      Tree::Comb(..) | Tree::ExtFn(..) | Tree::Branch(..) | Tree::Var(_) => false,
-      Tree::BlackBox(t) => t.is_nilary(),
+      TreeNode::Erase | TreeNode::N32(_) | TreeNode::F32(_) | TreeNode::Global(_) => true,
+      TreeNode::Comb(..) | TreeNode::ExtFn(..) | TreeNode::Branch(..) | TreeNode::Var(_) => false,
+      TreeNode::BlackBox(t) => t.is_nilary(),
     }
   }
 }

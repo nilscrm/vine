@@ -1,0 +1,13 @@
+::main {
+  @io_print_char(c:N32 @io_flush(0:N32 _:~IO))
+  f:fn(~N32 N32) = fn(104:N32 c:~N32)
+  ::id2 = fn(::id f:fn(N32 ~N32))
+}
+
+::id {
+  fn(x x) : fn(~N32 N32)
+}
+
+::id2 {
+  fn(f f) : fn(fn(N32'a ~N32'b) fn(~N32'a N32'b))
+}

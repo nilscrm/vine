@@ -4,7 +4,7 @@ use vine_util::{
 };
 
 use crate::{
-  ast::{Net, Nets, Tree},
+  ast::{Net, Nets, Polarity, PrimitiveType, Tree, TreeNode, Type},
   lexer::Token,
 };
 
@@ -88,16 +88,26 @@ impl<'src> IvyParser<'src> {
   }
 
   fn parse_tree(&mut self) -> Parse<'src, Tree> {
+    let tree = self.parse_tree_node()?;
+    if self.eat(Token::Colon)? {
+      let ty = self.parse_type()?;
+      Ok(Tree { tree_node: tree, ty: Some(ty) })
+    } else {
+      Ok(Tree { tree_node: tree, ty: None })
+    }
+  }
+
+  fn parse_tree_node(&mut self) -> Parse<'src, TreeNode> {
     if self.check(Token::N32) {
-      return Ok(Tree::N32(self.parse_n32()?));
+      return Ok(TreeNode::N32(self.parse_n32()?));
     }
 
     if self.check(Token::F32) {
-      return Ok(Tree::F32(self.parse_f32()?));
+      return Ok(TreeNode::F32(self.parse_f32()?));
     }
 
     if self.check(Token::Global) {
-      return Ok(Tree::Global(self.expect(Token::Global)?.to_owned()));
+      return Ok(TreeNode::Global(self.expect(Token::Global)?.to_owned()));
     }
 
     if self.check(Token::Ident) {
@@ -107,9 +117,9 @@ impl<'src> IvyParser<'src> {
         let a = self.parse_tree()?;
         let b = self.parse_tree()?;
         self.expect(Token::CloseParen)?;
-        return Ok(Tree::Comb(label, Box::new(a), Box::new(b)));
+        return Ok(TreeNode::Comb(label, Box::new(a), Box::new(b)));
       } else {
-        return Ok(Tree::Var(ident));
+        return Ok(TreeNode::Var(ident));
       }
     }
 
@@ -121,7 +131,7 @@ impl<'src> IvyParser<'src> {
       let a = self.parse_tree()?;
       let b = self.parse_tree()?;
       self.expect(Token::CloseParen)?;
-      return Ok(Tree::ExtFn(ext_fn, swapped, Box::new(a), Box::new(b)));
+      return Ok(TreeNode::ExtFn(ext_fn, swapped, Box::new(a), Box::new(b)));
     }
 
     if self.eat(Token::Question)? {
@@ -130,20 +140,63 @@ impl<'src> IvyParser<'src> {
       let b = self.parse_tree()?;
       let c = self.parse_tree()?;
       self.expect(Token::CloseParen)?;
-      return Ok(Tree::Branch(Box::new(a), Box::new(b), Box::new(c)));
+      return Ok(TreeNode::Branch(Box::new(a), Box::new(b), Box::new(c)));
     }
 
     if self.eat(Token::Hole)? {
-      return Ok(Tree::Erase);
+      return Ok(TreeNode::Erase);
     }
 
     if self.eat(Token::Hash)? {
       self.expect(Token::OpenBracket)?;
       let inner = self.parse_tree()?;
       self.expect(Token::CloseBracket)?;
-      return Ok(Tree::BlackBox(Box::new(inner)));
+      return Ok(TreeNode::BlackBox(Box::new(inner)));
     }
 
     self.unexpected()
+  }
+
+  fn parse_type(&mut self) -> Parse<'src, Type> {
+    if self.check(Token::Ident) {
+      let label = self.expect(Token::Ident)?.to_owned();
+      if self.eat(Token::OpenParen)? {
+        let left = self.parse_type()?;
+        let right = self.parse_type()?;
+        self.expect(Token::CloseParen)?;
+        return Ok(Type::Pair { label, left: Box::new(left), right: Box::new(right) });
+      }
+    }
+
+    let polarity = self.parse_polarity()?;
+    let primitive_type = self.parse_primitive_type()?;
+    let lifetime = if self.eat(Token::SingleQuote)? {
+      let lifetime = self.expect(Token::Ident)?.to_string();
+      Some(lifetime)
+    } else {
+      None
+    };
+
+    Ok(Type::Primitive { ty: primitive_type, polarity, lifetime })
+  }
+
+  fn parse_primitive_type(&mut self) -> Parse<'src, PrimitiveType> {
+    if self.eat(Token::N32Ty)? {
+      Ok(PrimitiveType::N32)
+    } else if self.eat(Token::F32Ty)? {
+      Ok(PrimitiveType::F32)
+    } else if self.eat(Token::IOTy)? {
+      Ok(PrimitiveType::IO)
+    } else {
+      self.unexpected()
+    }
+  }
+
+  fn parse_polarity(&mut self) -> Parse<'src, Polarity> {
+    if self.eat(Token::Tilde)? {
+      Ok(Polarity::In)
+    } else {
+      Ok(Polarity::Out)
+    }
   }
 }

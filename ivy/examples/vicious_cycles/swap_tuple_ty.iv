@@ -1,0 +1,9 @@
+::main {
+  _:~IO
+  ::foo = fn(tup(x:N32 0:N32) tup(_:~N32 y:~N32))
+  x:~N32 = y:N32
+}
+
+::foo {
+  fn(tup(a b) tup(b a)) : fn(tup(~N32'a ~N32'b) tup(N32'b N32'a))
+}

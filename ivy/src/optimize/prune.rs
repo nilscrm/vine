@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::ast::{Net, Nets, Tree};
+use crate::ast::{Net, Nets, Tree, TreeNode};
 
 /// Prune unused global nets.
 pub fn prune(nets: &mut Nets) {
@@ -31,7 +31,7 @@ impl Prune<'_> {
   }
 
   fn visit_tree(&mut self, tree: &Tree) {
-    if let Tree::Global(name) = tree {
+    if let TreeNode::Global(name) = &tree.tree_node {
       self.visit_global(name);
     }
     for child in tree.children() {

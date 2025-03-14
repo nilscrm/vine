@@ -6,7 +6,7 @@ use std::{
 use ivm::{ext::Extrinsics, heap::Heap, port::Port, IVM};
 
 use crate::{
-  ast::{Net, Nets, Tree},
+  ast::{Net, Nets, Tree, TreeNode},
   host::Host,
 };
 
@@ -33,11 +33,11 @@ pub fn pre_reduce(nets: &mut Nets) {
     let mut reader = host.reader(ivm);
     net.root = reader.read_port(&Port::new_wire(r.1));
     net.pairs.clear();
-    net.pairs.extend(
-      inert
-        .into_iter()
-        .map(|(a, b)| (reader.read_port(&a), Tree::BlackBox(Box::new(reader.read_port(&b))))),
-    );
+    // net.pairs.extend(
+    //   inert
+    //     .into_iter()
+    //     .map(|(a, b)| (reader.read_port(&a),
+    // TreeNode::BlackBox(Box::new(reader.read_port(&b))))), );
   }
 }
 
@@ -70,7 +70,7 @@ impl PreReduce<'_> {
   }
 
   fn visit_tree(&mut self, tree: &Tree) {
-    if let Tree::Global(name) = tree {
+    if let TreeNode::Global(name) = &tree.tree_node {
       self.visit_global(name);
     }
     for child in tree.children() {

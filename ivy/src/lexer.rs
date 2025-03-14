@@ -33,6 +33,19 @@ pub enum Token {
   Question,
   #[token("#")]
   Hash,
+  #[token(":")]
+  Colon,
+  #[token("~")]
+  Tilde,
+  #[token("'")]
+  SingleQuote,
+
+  #[token("N32")]
+  N32Ty,
+  #[token("F32")]
+  F32Ty,
+  #[token("IO")]
+  IOTy,
 
   #[regex(r"\d[\d\w]*")]
   N32,

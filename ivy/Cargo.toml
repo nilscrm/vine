@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0.87"
 indexmap = "2.2.6"
 logos = "0.14.0"
 

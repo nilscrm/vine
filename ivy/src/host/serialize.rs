@@ -56,7 +56,7 @@ use ivm::{
 use vine_util::bicycle::{Bicycle, BicycleState};
 
 use crate::{
-  ast::{Net, Nets, Tree},
+  ast::{Net, Nets, TreeNode},
   host::Host,
 };
 
@@ -132,7 +132,11 @@ impl<'l, 'ast, 'ivm> Serializer<'l, 'ast, 'ivm> {
     self.registers.clear();
 
     for (a, b) in &net.pairs {
-      let (Tree::Var(a), Tree::Var(b)) = (self.unbox(a), self.unbox(b)) else { continue };
+      let (TreeNode::Var(a), TreeNode::Var(b)) =
+        (self.unbox(&a.tree_node), self.unbox(&b.tree_node))
+      else {
+        continue;
+      };
       let a = self.equivalences.remove(&**a).unwrap_or(a);
       let b = self.equivalences.remove(&**b).unwrap_or(b);
       self.equivalences.insert(a, b);
@@ -147,37 +151,38 @@ impl<'l, 'ast, 'ivm> Serializer<'l, 'ast, 'ivm> {
       }
     }
 
-    let root = self.unbox(&net.root);
-    if let Tree::Var(a) = root {
+    let root_node = self.unbox(&net.root.tree_node);
+
+    if let TreeNode::Var(a) = root_node {
       self.registers.insert(a, Register::ROOT);
       if let Some(b) = self.equivalences.get(&**a) {
         self.registers.insert(b, Register::ROOT);
       }
     }
     for (a, b) in net.pairs.iter().rev() {
-      self.serialize_pair(a, b);
+      self.serialize_pair(&a.tree_node, &b.tree_node);
     }
-    if !matches!(root, Tree::Var(_)) {
-      self.serialize_tree_to(&net.root, Register::ROOT);
+    if !matches!(root_node, TreeNode::Var(_)) {
+      self.serialize_tree_to(root_node, Register::ROOT);
     }
   }
 
-  fn serialize_pair(&mut self, a: &'ast Tree, b: &'ast Tree) {
+  fn serialize_pair(&mut self, a: &'ast TreeNode, b: &'ast TreeNode) {
     let a = self.unbox(a);
     let b = self.unbox(b);
     let (a, b) = match (a, b) {
-      (Tree::Var(_), Tree::Var(_)) => return,
-      (a, b @ Tree::Var(_)) => (b, a),
+      (TreeNode::Var(_), TreeNode::Var(_)) => return,
+      (a, b @ TreeNode::Var(_)) => (b, a),
       (a, b) => (a, b),
     };
     let to = self.serialize_tree(a);
     self.serialize_tree_to(b, to);
   }
 
-  fn serialize_tree(&mut self, tree: &'ast Tree) -> Register {
+  fn serialize_tree(&mut self, tree: &'ast TreeNode) -> Register {
     let tree = self.unbox(tree);
-    if let Tree::Var(var) = tree {
-      *self.registers.entry(var).or_insert_with(|| self.current.instructions.new_register())
+    if let TreeNode::Var(var) = &tree {
+      *self.registers.entry(&var).or_insert_with(|| self.current.instructions.new_register())
     } else {
       let r = self.current.instructions.new_register();
       self.serialize_tree_to(tree, r);
@@ -185,28 +190,28 @@ impl<'l, 'ast, 'ivm> Serializer<'l, 'ast, 'ivm> {
     }
   }
 
-  fn serialize_tree_to(&mut self, tree: &'ast Tree, to: Register) {
+  fn serialize_tree_to(&mut self, tree: &'ast TreeNode, to: Register) {
     match self.unbox(tree) {
-      Tree::Erase => self.push(Instruction::Nilary(to, Port::ERASE)),
-      Tree::N32(num) => {
+      TreeNode::Erase => self.push(Instruction::Nilary(to, Port::ERASE)),
+      TreeNode::N32(num) => {
         self.push(Instruction::Nilary(to, Port::new_ext_val(self.host.new_n32(*num))))
       }
-      Tree::F32(num) => {
+      TreeNode::F32(num) => {
         self.push(Instruction::Nilary(to, Port::new_ext_val(self.host.new_f32(*num))))
       }
-      Tree::Comb(label, a, b) => {
+      TreeNode::Comb(label, a, b) => {
         let label = self.host.label_to_u16(label);
-        let a = self.serialize_tree(a);
-        let b = self.serialize_tree(b);
+        let a = self.serialize_tree(&a.tree_node);
+        let b = self.serialize_tree(&b.tree_node);
         self.push(Instruction::Binary(Tag::Comb, label, to, a, b));
       }
-      Tree::ExtFn(f, swap, a, b) => {
-        let a = self.serialize_tree(a);
-        let b = self.serialize_tree(b);
+      TreeNode::ExtFn(f, swap, a, b) => {
+        let a = self.serialize_tree(&a.tree_node);
+        let b = self.serialize_tree(&b.tree_node);
         let ext_fn = self.host.instantiate_ext_fn(f, *swap);
         self.push(Instruction::Binary(Tag::ExtFn, ext_fn.bits(), to, a, b));
       }
-      Tree::Global(name) => {
+      TreeNode::Global(name) => {
         let global = self.host.get_raw(name).expect("undefined global");
         // Safety: upholds the requirements of `Tag::Global`, and preserves the interior
         // mutability.
@@ -215,29 +220,29 @@ impl<'l, 'ast, 'ivm> Serializer<'l, 'ast, 'ivm> {
         };
         self.push(Instruction::Nilary(to, port));
       }
-      Tree::Branch(z, p, o) => {
+      TreeNode::Branch(z, p, o) => {
         let a = self.current.instructions.new_register();
-        let z = self.serialize_tree(z);
-        let p = self.serialize_tree(p);
+        let z = self.serialize_tree(&z.tree_node);
+        let p = self.serialize_tree(&p.tree_node);
         self.push(Instruction::Binary(Tag::Branch, 0, a, z, p));
-        let o = self.serialize_tree(o);
+        let o = self.serialize_tree(&o.tree_node);
         self.push(Instruction::Binary(Tag::Branch, 0, to, a, o));
       }
-      Tree::Var(v) => {
+      TreeNode::Var(v) => {
         let old = self.registers.insert(v, to);
         debug_assert!(old.is_none());
       }
-      Tree::BlackBox(t) => {
-        let from = self.serialize_tree(t);
+      TreeNode::BlackBox(t) => {
+        let from = self.serialize_tree(&t.tree_node);
         self.push(Instruction::Inert(to, from));
       }
     }
   }
 
-  fn unbox(&mut self, mut tree: &'ast Tree) -> &'ast Tree {
+  fn unbox(&mut self, mut tree: &'ast TreeNode) -> &'ast TreeNode {
     if !self.black_box {
-      while let Tree::BlackBox(t) = tree {
-        tree = t;
+      while let TreeNode::BlackBox(t) = tree {
+        tree = &t.tree_node;
       }
     }
     tree

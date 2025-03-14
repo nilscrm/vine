@@ -1,0 +1,9 @@
+::main {
+  _
+  ::foo = fn(tup(x 0) tup(_ y))
+  x = y
+}
+
+::foo {
+  fn(tup(a b) tup(b a))
+}

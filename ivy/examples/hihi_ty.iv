@@ -1,0 +1,5 @@
+
+::main {
+  io0:~IO
+  dup(io0:IO io1:IO) = @io_print_char(104 @io_print_char(105 @io_print_char(10 @io_flush(0 dup(io1:~IO _:~IO)): dup(~IO ~IO)): dup(~IO ~IO)): dup(~IO ~IO)): dup(~IO ~IO)
+}
