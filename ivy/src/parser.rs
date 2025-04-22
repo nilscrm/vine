@@ -1,10 +1,12 @@
+use std::vec;
+
 use vine_util::{
   lexer::TokenSet,
   parser::{Parser, ParserState},
 };
 
 use crate::{
-  ast::{Net, Nets, Polarity, PrimitiveType, Tree, TreeNode, Type},
+  ast::{FlowLabel, Net, Nets, PrimitiveType, Tree, TreeNode, Type},
   lexer::Token,
 };
 
@@ -160,24 +162,32 @@ impl<'src> IvyParser<'src> {
   fn parse_type(&mut self) -> Parse<'src, Type> {
     if self.check(Token::Ident) {
       let label = self.expect(Token::Ident)?.to_owned();
-      if self.eat(Token::OpenParen)? {
-        let left = self.parse_type()?;
-        let right = self.parse_type()?;
-        self.expect(Token::CloseParen)?;
-        return Ok(Type::Pair { label, left: Box::new(left), right: Box::new(right) });
-      }
-    }
-
-    let polarity = self.parse_polarity()?;
-    let primitive_type = self.parse_primitive_type()?;
-    let lifetime = if self.eat(Token::SingleQuote)? {
-      let lifetime = self.expect(Token::Ident)?.to_string();
-      Some(lifetime)
+      self.expect(Token::OpenParen)?;
+      let left = self.parse_type()?;
+      let right = self.parse_type()?;
+      self.expect(Token::CloseParen)?;
+      Ok(Type::Pair { label, left: Box::new(left), right: Box::new(right) })
+    } else if self.eat(Token::Tilde)? {
+      let prim_ty = self.parse_primitive_type()?;
+      let flow = if self.eat(Token::SingleQuote)? {
+        FlowLabel::Label(self.expect(Token::Ident)?.to_string())
+      } else {
+        FlowLabel::Default
+      };
+      Ok(Type::In { prim_ty, flow })
     } else {
-      None
-    };
-
-    Ok(Type::Primitive { ty: primitive_type, polarity, lifetime })
+      let primitive_type = self.parse_primitive_type()?;
+      let mut flow_labels = vec![];
+      // If there is not flow label use the default one
+      if !self.check(Token::SingleQuote) {
+        flow_labels.push(FlowLabel::Default);
+      }
+      while self.eat(Token::SingleQuote)? {
+        let flow_label = self.expect(Token::Ident)?.to_string();
+        flow_labels.push(FlowLabel::Label(flow_label));
+      }
+      Ok(Type::Out { prim_ty: primitive_type, flow: flow_labels })
+    }
   }
 
   fn parse_primitive_type(&mut self) -> Parse<'src, PrimitiveType> {
@@ -189,14 +199,6 @@ impl<'src> IvyParser<'src> {
       Ok(PrimitiveType::IO)
     } else {
       self.unexpected()
-    }
-  }
-
-  fn parse_polarity(&mut self) -> Parse<'src, Polarity> {
-    if self.eat(Token::Tilde)? {
-      Ok(Polarity::In)
-    } else {
-      Ok(Polarity::Out)
     }
   }
 }

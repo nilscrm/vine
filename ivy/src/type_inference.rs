@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::{Nets, Polarity, PrimitiveType, Tree, TreeNode, Type};
+use crate::ast::{FlowLabel, Nets, PrimitiveType, Tree, TreeNode, Type};
 
 pub struct TypeInference {
   global_types: HashMap<String, Option<Type>>,
@@ -18,12 +18,8 @@ impl TypeInference {
   fn infer_types_tree(&self, tree: &mut Tree, hint: Option<&Type>) {
     let inferred_type = match &mut tree.tree_node {
       TreeNode::Erase => None,
-      TreeNode::N32(_) => {
-        Some(Type::Primitive { ty: PrimitiveType::N32, polarity: Polarity::Out, lifetime: None })
-      }
-      TreeNode::F32(_) => {
-        Some(Type::Primitive { ty: PrimitiveType::F32, polarity: Polarity::Out, lifetime: None })
-      }
+      TreeNode::N32(_) => Some(Type::Out { prim_ty: PrimitiveType::N32, flow: Vec::new() }),
+      TreeNode::F32(_) => Some(Type::Out { prim_ty: PrimitiveType::F32, flow: Vec::new() }),
       TreeNode::Var(_) => None,
       TreeNode::Global(name) => self.global_types[name].to_owned(),
       TreeNode::ExtFn(name, swapped_arguments, left, right) => {
@@ -32,29 +28,21 @@ impl TypeInference {
         match name.as_str() {
           "n32_add" | "n32_sub" | "n32_mul" | "n32_div" | "n32_rem" | "n32_eq" | "n32_ne"
           | "n32_lt" | "n32_le" => {
-            Some(Type::Primitive { ty: PrimitiveType::N32, polarity: Polarity::In, lifetime: None })
+            Some(Type::In { prim_ty: PrimitiveType::N32, flow: FlowLabel::Default })
           }
           "f32_add" | "f32_sub" | "f32_mul" | "f32_div" | "f32_rem" | "f32_eq" | "f32_ne"
           | "f32_lt" | "f32_le" => {
-            Some(Type::Primitive { ty: PrimitiveType::F32, polarity: Polarity::In, lifetime: None })
+            Some(Type::In { prim_ty: PrimitiveType::F32, flow: FlowLabel::Default })
           }
           "n32_shl" | "n32_shr" | "n32_rotl" | "n32_rotr" | "n32_and" | "n32_or" | "n32_xor"
           | "n32_add_high" | "n32_mul_high" => {
-            Some(Type::Primitive { ty: PrimitiveType::N32, polarity: Polarity::In, lifetime: None })
+            Some(Type::In { prim_ty: PrimitiveType::N32, flow: FlowLabel::Default })
           }
           "io_print_char" | "io_print_byte" | "io_flush" | "io_read_byte" => {
             if *swapped_arguments {
-              Some(Type::Primitive {
-                ty: PrimitiveType::N32,
-                polarity: Polarity::In,
-                lifetime: None,
-              })
+              Some(Type::In { prim_ty: PrimitiveType::N32, flow: FlowLabel::Default })
             } else {
-              Some(Type::Primitive {
-                ty: PrimitiveType::IO,
-                polarity: Polarity::In,
-                lifetime: None,
-              })
+              Some(Type::In { prim_ty: PrimitiveType::IO, flow: FlowLabel::Default })
             }
           }
           "seq" => right.ty.to_owned(),
@@ -83,7 +71,7 @@ impl TypeInference {
         self.infer_types_tree(zero, None);
         self.infer_types_tree(positive, None);
         self.infer_types_tree(out, None);
-        Some(Type::Primitive { ty: PrimitiveType::N32, polarity: Polarity::In, lifetime: None })
+        Some(Type::In { prim_ty: PrimitiveType::N32, flow: FlowLabel::Default })
       }
       TreeNode::BlackBox(inner) => {
         self.infer_types_tree(inner, hint);

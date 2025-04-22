@@ -1,0 +1,14 @@
+::main {
+  _: ~IO
+  // (x, y) = foo(y, 2, 3)
+  ::foo = fn(y:N32 fn(2 fn(3 pair(x:~N32 y:~N32))))
+  _:~N32 = x:N32
+}
+
+// foo(a, b, c) = (a + b, b + c)
+::foo {
+  fn(a fn(b fn(c pair(x y)))) : fn(~N32'a fn(~N32'b fn(~N32'c pair(N32'a'b N32'b'c))))
+  b:N32 = dup(b1:~N32 b2:~N32)
+  b1:N32 = @n32_add(a:N32 x:~N32)
+  b2:N32 = @n32_add(c:N32 y:~N32)
+}

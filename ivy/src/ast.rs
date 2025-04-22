@@ -8,13 +8,6 @@ use indexmap::IndexMap;
 
 use vine_util::multi_iter;
 
-#[derive(Default, Debug, Clone, PartialEq, Copy)]
-pub enum Polarity {
-  #[default]
-  Out,
-  In,
-}
-
 #[derive(Debug, Clone, PartialEq, Copy)]
 pub enum PrimitiveType {
   N32,
@@ -22,9 +15,16 @@ pub enum PrimitiveType {
   IO,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FlowLabel {
+  Default,
+  Label(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
-  Primitive { ty: PrimitiveType, polarity: Polarity, lifetime: Option<String> },
+  In { prim_ty: PrimitiveType, flow: FlowLabel },
+  Out { prim_ty: PrimitiveType, flow: Vec<FlowLabel> },
   Pair { label: String, left: Box<Type>, right: Box<Type> },
 }
 
@@ -70,15 +70,6 @@ impl DerefMut for Nets {
   }
 }
 
-impl Display for Polarity {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      Polarity::Out => write!(f, "Out"),
-      Polarity::In => write!(f, "In"),
-    }
-  }
-}
-
 impl Display for PrimitiveType {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
@@ -89,16 +80,23 @@ impl Display for PrimitiveType {
   }
 }
 
+impl Display for FlowLabel {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      FlowLabel::Default => write!(f, ""),
+      FlowLabel::Label(label) => write!(f, "'{label}"),
+    }
+  }
+}
+
 impl Display for Type {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Type::Primitive { ty, polarity, lifetime } => {
-        if polarity == &Polarity::In {
-          write!(f, "~")?;
-        }
-        write!(f, "{}", ty)?;
-        if let Some(lifetime) = lifetime {
-          write!(f, "'{}", lifetime)?;
+      Type::In { prim_ty: ty, flow } => write!(f, "~{ty}{flow}"),
+      Type::Out { prim_ty: ty, flow } => {
+        write!(f, "{ty}")?;
+        for flow in flow {
+          write!(f, "{flow}")?;
         }
         Ok(())
       }
@@ -221,14 +219,5 @@ impl Tree {
 impl Net {
   pub fn ty(&self) -> &Option<Type> {
     &self.root.ty
-  }
-}
-
-impl Polarity {
-  pub fn inverse(&self) -> Polarity {
-    match self {
-      Polarity::Out => Polarity::In,
-      Polarity::In => Polarity::Out,
-    }
   }
 }

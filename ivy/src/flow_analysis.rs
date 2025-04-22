@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{bail, Ok, Result};
 
-use crate::ast::{Net, Nets, Polarity, Tree, TreeNode, Type};
+use crate::ast::{FlowLabel, Net, Nets, Tree, TreeNode, Type};
 
 #[derive(Default, Debug)]
 pub struct FlowAnalysis<'ast> {
@@ -31,7 +31,7 @@ impl<'ast> Display for FlowAnalysis<'ast> {
 #[derive(Debug)]
 pub enum FlowError {
   FlowCycle(Vec<Tree>),
-  IncompatibleLifetimesFlow { incompatible_lifetime: Option<String>, tree: Tree },
+  IncompatibleFlowLabel { incompatible_flow_label: FlowLabel, tree: Tree },
 }
 
 impl Display for FlowError {
@@ -44,10 +44,10 @@ impl Display for FlowError {
         }
         fmt::Result::Ok(())
       }
-      FlowError::IncompatibleLifetimesFlow { incompatible_lifetime, tree } => {
+      FlowError::IncompatibleFlowLabel { incompatible_flow_label, tree } => {
         writeln!(
           f,
-          "Tree {tree} has the incompatible lifetime {incompatible_lifetime:?} flowing into it"
+          "Tree {tree} has the incompatible flow with label {incompatible_flow_label} flowing into it"
         )
       }
     }
@@ -59,7 +59,7 @@ impl Error for FlowError {}
 #[derive(Debug, Clone)]
 pub struct FlowNode<'ast> {
   tree: &'ast Tree,
-  lifetime: &'ast Option<String>,
+  flow_labels: Vec<FlowLabel>,
   neighbors: Vec<usize>,
   num_incoming_edges: u32,
 }
@@ -67,9 +67,9 @@ pub struct FlowNode<'ast> {
 #[derive(Debug, Clone, PartialEq)]
 enum Flow {
   /// Flow towards the leafs of the tree
-  Down(usize),
+  In(usize),
   /// Flow towards the root of the tree
-  Up(usize),
+  Out(usize),
   Pair {
     label: String,
     left: Box<Flow>,
@@ -80,7 +80,7 @@ enum Flow {
 impl Flow {
   pub fn flow_nodes(&self) -> Vec<usize> {
     match self {
-      Flow::Down(node) | Flow::Up(node) => vec![*node],
+      Flow::In(node) | Flow::Out(node) => vec![*node],
       Flow::Pair { left, right, .. } => {
         let mut nodes = left.flow_nodes();
         nodes.extend(right.flow_nodes());
@@ -108,7 +108,7 @@ impl<'ast> FlowAnalysis<'ast> {
     let root_flow = flow_analysis.build_flow_graph_tree(&net.root);
 
     flow_analysis.detect_cycles()?;
-    flow_analysis.detect_incorrect_lifetime_flow(&root_flow)
+    flow_analysis.detect_incorrect_flow(&root_flow)
   }
 
   fn build_flow_graph_tree(&mut self, tree: &'ast Tree) -> Flow {
@@ -117,7 +117,7 @@ impl<'ast> FlowAnalysis<'ast> {
       TreeNode::Erase | TreeNode::N32(_) | TreeNode::F32(_) => self.flow_from_type(ty, tree),
       TreeNode::Global(_) => {
         let flow = self.flow_from_type(ty, tree);
-        self.connect_flow_according_to_lifetimes(&flow);
+        self.connect_flow_according_to_flow_labels(&flow);
         flow
       }
       TreeNode::Var(name) => {
@@ -170,22 +170,22 @@ impl<'ast> FlowAnalysis<'ast> {
     }
   }
 
-  fn new_node(&mut self, tree: &'ast Tree, lifetime: &'ast Option<String>) -> usize {
+  fn new_node(&mut self, tree: &'ast Tree, flow_labels: Vec<FlowLabel>) -> usize {
     let id = self.flow_nodes.len();
-    let node = FlowNode { tree, lifetime, neighbors: Vec::new(), num_incoming_edges: 0 };
+    let node = FlowNode { tree, flow_labels, neighbors: Vec::new(), num_incoming_edges: 0 };
     self.flow_nodes.push(node);
     id
   }
 
   fn flow_from_type(&mut self, ty: &'ast Type, tree: &'ast Tree) -> Flow {
     match ty {
-      Type::Primitive { ty: _, polarity: Polarity::Out, lifetime } => {
-        let node_id = self.new_node(tree, lifetime);
-        Flow::Up(node_id)
+      Type::Out { prim_ty: _, flow } => {
+        let node_id = self.new_node(tree, flow.to_owned());
+        Flow::Out(node_id)
       }
-      Type::Primitive { ty: _, polarity: Polarity::In, lifetime } => {
-        let node_id = self.new_node(tree, lifetime);
-        Flow::Down(node_id)
+      Type::In { prim_ty: _, flow } => {
+        let node_id = self.new_node(tree, vec![flow.clone()]);
+        Flow::In(node_id)
       }
       Type::Pair { label, left, right } => {
         let left_flow = self.flow_from_type(left, tree);
@@ -199,42 +199,46 @@ impl<'ast> FlowAnalysis<'ast> {
     }
   }
 
-  fn connect_flow_according_to_lifetimes(&mut self, flow: &Flow) {
-    // Map from each lifetime to the down flow nodes that have that lifetime
-    let mut lifetime_down = HashMap::<Option<String>, HashSet<usize>>::new();
-    // Map from each lifetime to the up flow nodes that have that lifetime
-    let mut lifetime_up = HashMap::<Option<String>, HashSet<usize>>::new();
-    self.connect_flow_according_to_lifetimes_aux(flow, &mut lifetime_down, &mut lifetime_up);
+  fn connect_flow_according_to_flow_labels(&mut self, flow: &Flow) {
+    // Map from each flow label to the In flow nodes that have that flow label
+    let mut flows_in = HashMap::<FlowLabel, HashSet<usize>>::new();
+    // Map from each flow label to the Out flow nodes that have that flow label
+    let mut flows_out = HashMap::<FlowLabel, HashSet<usize>>::new();
+    self.connect_flow_according_to_flow_labels_aux(flow, &mut flows_in, &mut flows_out);
   }
 
-  fn connect_flow_according_to_lifetimes_aux(
+  fn connect_flow_according_to_flow_labels_aux(
     &mut self,
     flow: &Flow,
-    lifetime_down: &mut HashMap<Option<String>, HashSet<usize>>,
-    lifetime_up: &mut HashMap<Option<String>, HashSet<usize>>,
+    flows_in: &mut HashMap<FlowLabel, HashSet<usize>>,
+    flows_out: &mut HashMap<FlowLabel, HashSet<usize>>,
   ) {
     match flow {
-      Flow::Down(node) => {
-        let lifetime = self.flow_nodes[*node].lifetime.to_owned();
-        lifetime_down.entry(lifetime.clone()).or_default().insert(*node);
-        if let Some(group_up) = lifetime_up.get(&lifetime) {
-          for up_elem in group_up {
-            self.add_flow_edge(*node, *up_elem);
+      Flow::In(node) => {
+        let flow_labels = self.flow_nodes[*node].flow_labels.to_owned();
+        for flow_label in flow_labels {
+          if let Some(out_nodes) = flows_out.get(&flow_label) {
+            for out_node in out_nodes {
+              self.add_flow_edge(*node, *out_node);
+            }
           }
+          flows_in.entry(flow_label).or_default().insert(*node);
         }
       }
-      Flow::Up(node) => {
-        let lifetime = self.flow_nodes[*node].lifetime.to_owned();
-        lifetime_up.entry(lifetime.clone()).or_default().insert(*node);
-        if let Some(group_down) = lifetime_down.get(&lifetime) {
-          for down_elem in group_down {
-            self.add_flow_edge(*down_elem, *node);
+      Flow::Out(node) => {
+        let flow_labels = self.flow_nodes[*node].flow_labels.to_owned();
+        for flow_label in flow_labels {
+          if let Some(in_nodes) = flows_in.get(&flow_label) {
+            for in_node in in_nodes {
+              self.add_flow_edge(*in_node, *node);
+            }
           }
+          flows_out.entry(flow_label).or_default().insert(*node);
         }
       }
       Flow::Pair { left, right, .. } => {
-        self.connect_flow_according_to_lifetimes_aux(left, lifetime_down, lifetime_up);
-        self.connect_flow_according_to_lifetimes_aux(right, lifetime_down, lifetime_up);
+        self.connect_flow_according_to_flow_labels_aux(left, flows_in, flows_out);
+        self.connect_flow_according_to_flow_labels_aux(right, flows_in, flows_out);
       }
     }
   }
@@ -242,10 +246,10 @@ impl<'ast> FlowAnalysis<'ast> {
   // Connect the flows of the two ends of a variable together
   fn connect_var_flows(&mut self, flow1: &Flow, flow2: &Flow) {
     match (flow1, flow2) {
-      (Flow::Down(node1), Flow::Up(node2)) => {
+      (Flow::In(node1), Flow::Out(node2)) => {
         self.add_flow_edge(*node1, *node2);
       }
-      (Flow::Up(node1), Flow::Down(node2)) => {
+      (Flow::Out(node1), Flow::In(node2)) => {
         self.add_flow_edge(*node2, *node1);
       }
       (
@@ -267,13 +271,13 @@ impl<'ast> FlowAnalysis<'ast> {
   // primary ports and an aux port)
   fn connect_stacked_flows(&mut self, flow_top: &Flow, flow_bottom: &Flow) {
     match (flow_top, flow_bottom) {
-      (Flow::Down(node_top), Flow::Down(node_bottom)) => {
+      (Flow::In(node_top), Flow::In(node_bottom)) => {
         self.add_flow_edge(*node_top, *node_bottom);
       }
-      (Flow::Up(node_top), Flow::Up(node_bottom)) => {
+      (Flow::Out(node_top), Flow::Out(node_bottom)) => {
         self.add_flow_edge(*node_bottom, *node_top);
       }
-      (Flow::Down(_), Flow::Up(_)) | (Flow::Up(_), Flow::Down(_)) => {}
+      (Flow::In(_), Flow::Out(_)) | (Flow::Out(_), Flow::In(_)) => {}
       (
         Flow::Pair { label: label_top, left: left_top, right: right_top },
         Flow::Pair { label: label_bottom, left: left_bottom, right: right_bottom },
@@ -300,13 +304,13 @@ impl<'ast> FlowAnalysis<'ast> {
   // connecting the flows of the aux ports of a binary node)
   fn connect_tree_flows(&mut self, flow1: &Flow, flow2: &Flow) {
     match (flow1, flow2) {
-      (Flow::Down(node1), Flow::Up(node2)) => {
+      (Flow::In(node1), Flow::Out(node2)) => {
         self.add_flow_edge(*node2, *node1);
       }
-      (Flow::Up(node1), Flow::Down(node2)) => {
+      (Flow::Out(node1), Flow::In(node2)) => {
         self.add_flow_edge(*node1, *node2);
       }
-      (Flow::Up(_), Flow::Up(_)) | (Flow::Down(_), Flow::Down(_)) => {}
+      (Flow::Out(_), Flow::Out(_)) | (Flow::In(_), Flow::In(_)) => {}
       (
         Flow::Pair { label: label1, left: left1, right: right1 },
         Flow::Pair { label: label2, left: left2, right: right2 },
@@ -373,7 +377,7 @@ impl<'ast> FlowAnalysis<'ast> {
     Ok(())
   }
 
-  fn detect_incorrect_lifetime_flow(&self, root_flow: &Flow) -> Result<()> {
+  fn detect_incorrect_flow(&self, root_flow: &Flow) -> Result<()> {
     // Start with all root nodes that don't have incoming edges
     let mut todo = root_flow
       .flow_nodes()
@@ -381,19 +385,19 @@ impl<'ast> FlowAnalysis<'ast> {
       .filter(|node_idx| self.flow_nodes[*node_idx].num_incoming_edges == 0)
       .collect::<Vec<_>>();
 
-    let mut lifetimes = HashMap::<usize, HashSet<Option<String>>>::new();
+    let mut flows = HashMap::<usize, HashSet<FlowLabel>>::new();
     for node_idx in &todo {
-      let lifetime = self.flow_nodes[*node_idx].lifetime.to_owned();
-      lifetimes.entry(*node_idx).or_default().insert(lifetime);
+      let flow_labels = self.flow_nodes[*node_idx].flow_labels.to_owned();
+      flows.entry(*node_idx).or_default().extend(flow_labels);
     }
 
     let mut num_unprocessed_predecessors =
       self.flow_nodes.iter().map(|node| node.num_incoming_edges).collect::<Vec<_>>();
 
     while let Some(node_idx) = todo.pop() {
-      let node_lifetimes = lifetimes.get(&node_idx).unwrap().to_owned();
+      let node_flow = flows.get(&node_idx).unwrap().to_owned();
       for neighbor_idx in &self.flow_nodes[node_idx].neighbors {
-        lifetimes.entry(*neighbor_idx).or_default().extend(node_lifetimes.clone());
+        flows.entry(*neighbor_idx).or_default().extend(node_flow.clone());
         num_unprocessed_predecessors[*neighbor_idx] -= 1;
         if num_unprocessed_predecessors[*neighbor_idx] == 0 {
           todo.push(*neighbor_idx);
@@ -402,14 +406,13 @@ impl<'ast> FlowAnalysis<'ast> {
     }
 
     for node in root_flow.flow_nodes() {
-      let node_lifetime = self.flow_nodes[node].lifetime;
-      // Check that only the lifetime the node is annotated with can actually reach
-      // that node
-      if let Some(reaching_lifetimes) = lifetimes.get(&node) {
-        for reaching_lifetime in reaching_lifetimes {
-          if reaching_lifetime != node_lifetime {
-            bail!(FlowError::IncompatibleLifetimesFlow {
-              incompatible_lifetime: reaching_lifetime.to_owned(),
+      let flow_labels = &self.flow_nodes[node].flow_labels;
+      // Check that only the annotated flow labels can actually reach that node
+      if let Some(reaching_flow_labels) = flows.get(&node) {
+        for reaching_flow_label in reaching_flow_labels {
+          if !flow_labels.contains(reaching_flow_label) {
+            bail!(FlowError::IncompatibleFlowLabel {
+              incompatible_flow_label: reaching_flow_label.to_owned(),
               tree: self.flow_nodes[node].tree.clone()
             });
           }
