@@ -1,0 +1,11 @@
+::main { _:IO- }
+
+::add_ref {
+  fn(
+    ref(dup(b0:N32- b1:N32-) b1:N32+) : ref(dup(N32-, N32-) <> N32+)
+    fn(
+      ref(@n32_or(b0:N32+ c0:N32-):N32- c1:N32+) : ref(N32- <> N32+)
+      ref(c0:N32+ c1:N32-) : ref(N32+ <> N32-)
+    ) : fn(ref(N32-, N32+), ref(N32+ <> N32-))
+  )
+}

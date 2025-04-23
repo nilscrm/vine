@@ -1,0 +1,22 @@
+::main {
+  _
+  ::fn_swap = tup(a b)
+  ::compose = fn(a fn(b _))
+}
+
+::compose {
+  fn(
+    fn(a b)
+    fn(
+      fn(b c)
+      fn(a c)
+    )
+  ) 
+}
+
+::fn_swap {
+  tup(
+    fn(x y)
+    fn(y x)
+  )
+}

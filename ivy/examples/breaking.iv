@@ -1,0 +1,109 @@
+
+::main {
+  _:IO-
+  // ::id_id:fn(N32-  N32+) = fn(c:N32+ c:N32-) : fn(N32+ <> N32-)
+}
+
+// fn(N32+ <> N32-)             fn(N32- <> N32+)
+// x                          x
+// fn(N32- , N32+)           fn(N32- , N32+)
+
+
+::id_id {
+  f:fn(N32- <> N32+)
+  fn(x:fn(N32+, N32-) x:fn(N32- <> N32+)): fn(fn(N32+, N32-) <> fn(N32- <> N32+)) = fn(fn(y:N32- y:N32+):fn(N32- <> N32+) f:fn(N32+, N32-))
+}
+
+
+let x;
+let y = fn(a) { x = a; }
+y(x)
+
+list(N32+, list(Buf+ <> Buf-))
+
+if length == 0{
+  None
+} else {
+
+}
+
+
+'l List[forall 'end](3, 'l Buf(a, 'l Buf(b, 'l Buf(c, 'end end))), 'end end)
+
+
+
+let list = [2]
+list.length = 1
+let el = list.pop().unwrap();
+list.push(el);
+
+
+
+
+
+fn(x, y)
+
+::add {
+  fn(
+    ref(@n32_or(1:N32+ c0:N32-) c1:N32+) : ref(N32- <> N32+)
+    ref(c0:N32+ c1:N32-) : ref(N32+, N32-)
+  ) : fn( ref(N32- <> N32+) <> ref(N32+, N32-) )
+ }
+
+ fn((tup(T+'a, T+'b)), tup(T-'a, T-'b))
+
+ ::add_ref {
+   fn(
+     ref(dup(b0:N32- b1:N32-) b1:N32+) : ref(dup(N32-, N32-) <> N32+)
+     fn(
+       ref(@n32_or(b0:N32+ c0:N32-):N32- c1:N32+) : ref(N32- <> N32+)
+       ref(c0:N32+ c1:N32-) : ref(N32+ <> N32-)
+     ) : fn(ref(N32-'a, N32+'a), ref(N32+'a  N32-'a))
+   )
+ }
+
+
+::add_ref {
+   fn(
+     ref(dup(b0 b1) b1)
+     fn(
+       ref(@n32_or(b0 c0) c1)
+       ref(c0 c1)
+     )
+   )
+ }
+
+
+
+match x {
+  Some(foo) => foo,
+  None => bar,
+}
+
+foo bar
+
+
+
+match x {
+  Some(foo) { let x = 1; foo }
+  None { bar }
+}
+
+foo.bar().baz() unless bool
+
+let x = then(.................) if bool else otherwise
+
+bool then "then" else "else"
+
+if (bool) "then" else "else"
+
+if bool { "yay" } else { "nay" }
+
+if bool:
+  "yay"
+else:
+  "nay"
+
+
+match x { Some(foo) { foo(awd) } None { bar } }
+match x: Some(foo): foo(awd) None: bar

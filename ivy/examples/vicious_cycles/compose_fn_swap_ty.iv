@@ -1,0 +1,22 @@
+::main {
+  _:IO-
+  ::fn_swap = tup(a:fn(N32+, N32-) b:fn(N32+, N32-))
+  ::compose = fn(a:fn(N32- <> N32+) fn(b:fn(N32- <> N32+) _:fn(N32+, N32-)))
+}
+
+::compose {
+  fn(
+    fn(a:N32+ b:N32-)
+    fn(
+      fn(b:N32+ c:N32-)
+      fn(a:N32- c:N32+) : fn(N32- <> N32+)
+    ) : fn(fn(N32+, N32-) <> fn(N32- <> N32+))
+  ) : fn(fn(N32+, N32-) <> fn(fn(N32+, N32-) <> fn(N32- <> N32+)))
+}
+
+::fn_swap {
+  tup(
+    fn(x:N32- y:N32+) : fn(N32- <> N32+)
+    fn(y:N32- x:N32+) : fn(N32- <> N32+)
+  ) : tup(fn(N32- <> N32+) <> fn(N32- <> N32+))
+}

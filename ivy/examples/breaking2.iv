@@ -1,0 +1,18 @@
+
+::main {
+  _:IO-
+  ::foo = fn(tup(x:N32+ 0) tup(_:N32- y:N32-))
+  x:N32- = y:N32+
+}
+
+::foo {
+  fn(tup(a:N32- b:N32-) tup(b:N32+ a:N32+)) : fn(tup(N32-, N32-) <> tup(N32+, N32+))
+}
+
+// ::main { _:IO- }
+
+// ::bar {
+//   x:N32+
+//   tup(x:N32- y:N32+) = tup(z:N32+ z:N32-) : tup(N32+ <> N32-)
+//   y:N32- = 3
+// }
