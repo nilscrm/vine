@@ -1,0 +1,64 @@
+
+::main { ::channels::main }
+
+::channels::In::send { fn(n0 fn(n0 _)) }
+
+::channels::Out::receive { fn(n0 n0) }
+
+::channels::new_channel { tup(n0 n0) }
+
+::channels::new_channels { tup(::channels::new_channel ::channels::new_channel) }
+
+::channels::main {
+  fn(w1 _)
+  ::channels::new_channels = tup(tup(w6 w7) tup(w9 w10))
+  ::channels::In::send = fn(w6 fn(42 _))
+  ::channels::Out::receive = fn(w7 w17)
+  ::channels::In::send = fn(w9 fn(w17 _))
+  ::channels::Out::receive = fn(w10 w24)
+  ::std::numeric::N32::to_string::to_string = fn(w24 tup(@n32_add(0 w28) w29))
+  ::std::IO::println = fn(w1 fn(tup(w28 w29) _))
+}
+
+::std::numeric::N32::to_string::to_string {
+  fn(w0 w10)
+  ::std::numeric::N32::eq::ne = fn(ref(w0 w6) fn(ref(0 _) ?(::std::numeric::N32::to_string::to_string::3 ::std::numeric::N32::to_string::to_string::2 x(w6 w10))))
+}
+
+::std::numeric::N32::to_string::to_string::2 {
+  x(w6 w9)
+  ::std::numeric::N32::to_string::to_string::4 = x(w6 x(tup(0 tup(w7 w7)) w9))
+}
+
+::std::numeric::N32::to_string::to_string::3 { x(_ tup(1 tup(tup(48 w5) w5))) }
+
+::std::numeric::N32::to_string::to_string::4 { x(dup47(n0 @n32_ne(0 ?(::std::numeric::N32::to_string::to_string::6 ::std::numeric::N32::to_string::to_string::5 x(n0 n1)))) n1) }
+
+::std::numeric::N32::to_string::to_string::5 { x(dup41(@n32_rem(10 @n32_add$(48 n0)) @n32_div(10 dup47(n1 @n32_ne(0 ?(::std::numeric::N32::to_string::to_string::6 ::std::numeric::N32::to_string::to_string::5 x(n1 x(tup(n2 tup(tup(n0 n3) n4)) n5))))))) x(tup(@n32_add$(1 n2) tup(n3 n4)) n5)) }
+
+::std::numeric::N32::to_string::to_string::6 { x(_ x(n0 n0)) }
+
+::std::numeric::N32::eq::ne { fn(ref(dup47(n0 @n32_ne(n1 n2)) n0) fn(ref(dup48(n3 n1) n3) n2)) }
+
+::std::unicode::String::to_chars::cast { fn(w0 w0) }
+
+::std::IO::println {
+  fn(ref(w1 w12) fn(w3 _))
+  ::std::IO::print = fn(ref(w1 w7) fn(w3 _))
+  ::std::IO::print_char = fn(ref(w7 w12) fn(10 _))
+}
+
+::std::IO::print {
+  fn(ref(w1 w15) fn(w3 _))
+  ::std::unicode::String::to_chars::cast = fn(w3 tup(w8 tup(w9 _)))
+  ::std::IO::print::1 = x(x(w1 w15) x(w8 w9))
+}
+
+::std::IO::print::1 { x(n0 x(dup47(n1 @n32_ne(0 ?(::std::IO::print::3 ::std::IO::print::2 x(n0 x(n1 n2))))) n2)) }
+
+::std::IO::print::2 { x(x(@io_print_char(n0 n1) n2) x(@n32_sub(1 dup47(n3 @n32_ne(0 ?(::std::IO::print::3 ::std::IO::print::2 x(x(n1 n2) x(n3 n4)))))) tup(n0 n4))) }
+
+::std::IO::print::3 { x(x(n0 n0) _) }
+
+::std::IO::print_char { fn(ref(@io_print_char(n0 n1) n1) fn(n0 _)) }
+

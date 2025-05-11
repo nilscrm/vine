@@ -1,0 +1,12 @@
+
+
+::main : ~IO {
+  _
+  ::add_ref = fn(ref(1 _:~N32) fn(ref(2 b:~N32) ref(c1:~N32 c2:N32)))
+  c1:N32 = @n32_add(b c2)
+}
+
+::add_ref : fn(ref(~N32'a N32'c) fn(ref(dup(~N32'b ~N32'b) N32'b) ref(N32'a'b ~N32'c))) {
+  fn(ref(a1 a2) fn(ref(dup(b1 b2) b1) ref(a3 a2)))
+  a1:N32 = @n32_add(b2 a3)
+}

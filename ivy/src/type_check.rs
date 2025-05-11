@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Context, Ok, Result};
 
-use crate::ast::{FlowLabel, Net, Nets, PrimitiveType, Tree, TreeNode, Type};
+use crate::ast::{Net, Nets, PrimitiveType, Tree, TreeNode, Type};
 
 pub struct TypeChecker<'a> {
   nets: &'a Nets,
@@ -12,14 +12,13 @@ pub struct TypeChecker<'a> {
 impl Type {
   pub fn can_interact_with(&self, other: &Self) -> Result<()> {
     match (self, other) {
-      (Type::In { prim_ty: ty1, flow: _ }, Type::Out { prim_ty: ty2, flow: _ })
-      | (Type::Out { prim_ty: ty1, flow: _ }, Type::In { prim_ty: ty2, flow: _ }) => {
+      (Type::In(ty1), Type::Out(ty2)) | (Type::Out(ty1), Type::In(ty2)) => {
         if ty1 != ty2 {
           bail!("Types {ty1} and {ty2} cannot interact");
         }
         Ok(())
       }
-      (Type::In { .. }, Type::In { .. }) | (Type::Out { .. }, Type::Out { .. }) => {
+      (Type::In(_), Type::In(_)) | (Type::Out(_), Type::Out(_)) => {
         bail!("Types {self} and {other} of the same polarity cannot interact");
       }
       (
@@ -55,13 +54,13 @@ impl Type {
 
   pub fn compatible_with(&self, other: &Type) -> Result<()> {
     match (self, other) {
-      (Type::In { prim_ty: ty1, flow: _ }, Type::In { prim_ty: ty2, flow: _ }) => {
+      (Type::In(ty1), Type::In(ty2)) => {
         if ty1 != ty2 {
           bail!("Types {ty1} and {ty2} are not the same");
         }
         Ok(())
       }
-      (Type::Out { prim_ty: ty1, flow: _ }, Type::Out { prim_ty: ty2, flow: _ }) => {
+      (Type::Out(ty1), Type::Out(ty2)) => {
         if ty1 != ty2 {
           bail!("Types {ty1} and {ty2} are not the same");
         }
@@ -103,27 +102,25 @@ impl Tree {
 }
 
 impl<'a> TypeChecker<'a> {
-  const IO_IN_TYPE: Type = Type::In { prim_ty: PrimitiveType::IO, flow: FlowLabel::Default };
-  const IO_OUT_TYPE: Type = Type::Out { prim_ty: PrimitiveType::IO, flow: vec![] };
-  const N32_IN_TYPE: Type = Type::In { prim_ty: PrimitiveType::N32, flow: FlowLabel::Default };
-  const N32_OUT_TYPE: Type = Type::Out { prim_ty: PrimitiveType::N32, flow: vec![] };
-  const F32_IN_TYPE: Type = Type::In { prim_ty: PrimitiveType::F32, flow: FlowLabel::Default };
-  const F32_OUT_TYPE: Type = Type::Out { prim_ty: PrimitiveType::F32, flow: vec![] };
-
   pub fn type_check_nets(&mut self) -> Result<()> {
-    for net in self.nets.values() {
-      self.type_check_net(net)?;
+    for (name, net) in self.nets.iter() {
+      self.type_check_net(net).context(format!("Failed to type check net {name}"))?;
     }
-    // Can unwrap safely as type has been checked above.
-    let main_ty = self.nets["::main"].ty().to_owned().unwrap();
+    let main_ty = self.nets["::main"].net_type.to_type();
     main_ty
-      .compatible_with(&TypeChecker::IO_IN_TYPE)
+      .compatible_with(&Type::In(PrimitiveType::IO))
       .context(format!("Main net needs to be able to interact with ~IO but has type {main_ty}"))
   }
 
   fn type_check_net(&mut self, net: &Net) -> Result<()> {
     self.var_types.clear();
     self.type_check_tree(&net.root)?;
+    // Check that the root type actually matches the type of the net.
+    let net_type = net.net_type.to_type();
+    let root_type = net.root.ty.to_owned().unwrap();
+    if root_type != net_type {
+      bail!("Root of the net has type {root_type} but needs to be {net_type}");
+    }
     for (t1, t2) in &net.pairs {
       self.type_check_tree(t1)?;
       self.type_check_tree(t2)?;
@@ -141,11 +138,11 @@ impl<'a> TypeChecker<'a> {
     match &tree.tree_node {
       TreeNode::Erase => {}
       TreeNode::N32(_) => match ty {
-        Type::Out { prim_ty: PrimitiveType::N32, flow: _ } => {}
+        Type::Out(PrimitiveType::N32) => {}
         _ => bail!("N32 nodes needs to be of type N32 but got {ty}"),
       },
       TreeNode::F32(_) => match ty {
-        Type::Out { prim_ty: PrimitiveType::F32, flow: _ } => {}
+        Type::Out(PrimitiveType::F32) => {}
         _ => bail!("F32 nodes needs to be of type F32 but got {ty}"),
       },
       TreeNode::Var(name) => match self.var_types.get(name) {
@@ -159,14 +156,9 @@ impl<'a> TypeChecker<'a> {
         }
       },
       TreeNode::Global(name) => {
-        let global_type = self.nets[name].ty();
-        match global_type {
-          None => bail!("Global {name} has no type"),
-          Some(global_type) => {
-            if *global_type != ty {
-              bail!("Global {name} has type {global_type} and was used as {ty}");
-            }
-          }
+        let net_type = self.nets[name].net_type.to_type();
+        if net_type != ty {
+          bail!("Global {name} has type {net_type} and was used as {ty}");
         }
       }
       TreeNode::ExtFn(name, swapped_arguments, left, right) => {
@@ -177,59 +169,59 @@ impl<'a> TypeChecker<'a> {
           "n32_add" | "n32_sub" | "n32_mul" | "n32_div" | "n32_rem" | "n32_eq" | "n32_ne"
           | "n32_lt" | "n32_le" | "n32_shl" | "n32_shr" | "n32_rotl" | "n32_rotr" | "n32_and"
           | "n32_or" | "n32_xor" | "n32_add_high" | "n32_mul_high" => {
-            ty.compatible_with(&TypeChecker::N32_IN_TYPE).context(format!(
+            ty.compatible_with(&Type::In(PrimitiveType::N32)).context(format!(
               "Type of ExtFn {name} needs to be compatible with ~N32 but got {ty}"
             ))?;
-            left_ty.compatible_with(&TypeChecker::N32_OUT_TYPE).context(format!(
+            left_ty.compatible_with(&Type::Out(PrimitiveType::N32)).context(format!(
               "Left child of ExtFn {name} needs to be compatible with N32 but got {left_ty}"
             ))?;
-            out_ty.compatible_with(&TypeChecker::N32_IN_TYPE).context(format!(
+            out_ty.compatible_with(&Type::In(PrimitiveType::N32)).context(format!(
               "Result port of ExtFn {name} has to be compatible with ~N32 but has type {out_ty}"
             ))?;
           }
           "f32_add" | "f32_sub" | "f32_mul" | "f32_div" | "f32_rem" => {
-            ty.compatible_with(&TypeChecker::F32_IN_TYPE).context(format!(
+            ty.compatible_with(&Type::In(PrimitiveType::F32)).context(format!(
               "Type of ExtFn {name} needs to be compatible with ~F32 but got {ty}"
             ))?;
-            left_ty.compatible_with(&TypeChecker::F32_OUT_TYPE).context(format!(
+            left_ty.compatible_with(&Type::Out(PrimitiveType::F32)).context(format!(
               "Left child of ExtFn {name} needs to be compatible with F32 but got {left_ty}"
             ))?;
-            out_ty.compatible_with(&TypeChecker::F32_IN_TYPE).context(format!(
+            out_ty.compatible_with(&Type::In(PrimitiveType::F32)).context(format!(
               "Result port of ExtFn {name} has to be compatible with ~F32 but has type {out_ty}"
             ))?;
           }
           "f32_eq" | "f32_ne" | "f32_lt" | "f32_le" => {
-            ty.compatible_with(&TypeChecker::N32_IN_TYPE).context(format!(
+            ty.compatible_with(&Type::In(PrimitiveType::N32)).context(format!(
               "Type of ExtFn {name} needs to be compatible with ~N32 but got {ty}"
             ))?;
-            left_ty.compatible_with(&TypeChecker::F32_OUT_TYPE).context(format!(
+            left_ty.compatible_with(&Type::Out(PrimitiveType::F32)).context(format!(
               "Left child of ExtFn {name} needs to be compatible with F32 but got {left_ty}"
             ))?;
-            out_ty.compatible_with(&TypeChecker::N32_IN_TYPE).context(format!(
+            out_ty.compatible_with(&Type::In(PrimitiveType::N32)).context(format!(
               "Result port of ExtFn {name} has to be compatible with ~N32 but has type {out_ty}"
             ))?;
           }
           "io_print_char" | "io_print_byte" | "io_flush" | "io_read_byte" => {
             if *swapped_arguments {
-              ty.compatible_with(&TypeChecker::N32_IN_TYPE).context(format!(
+              ty.compatible_with(&Type::In(PrimitiveType::N32)).context(format!(
                 "ExtFn {name} with swapped arguments needs to be compatible with ~N32 but got {ty}"
               ))?;
-              left_ty.compatible_with(&TypeChecker::IO_OUT_TYPE).context(format!(
+              left_ty.compatible_with(&Type::Out(PrimitiveType::IO)).context(format!(
                 "Second argument to ExtFn {name} has to be compatible with IO but got {left_ty}"
               ))?;
             } else {
-              ty.compatible_with(&TypeChecker::IO_IN_TYPE)
+              ty.compatible_with(&Type::In(PrimitiveType::IO))
                 .context(format!("ExtFn {name} needs to be compatible with ~IO but got {ty}"))?;
-              left_ty.compatible_with(&TypeChecker::N32_OUT_TYPE).context(format!(
+              left_ty.compatible_with(&Type::Out(PrimitiveType::N32)).context(format!(
                 "First argument to ExtFn {name} has to be compatible with N32 but got {left_ty}"
               ))?;
             }
             if name == "io_read_byte" {
-              out_ty.compatible_with(&TypeChecker::N32_IN_TYPE).context(format!(
+              out_ty.compatible_with(&Type::In(PrimitiveType::N32)).context(format!(
                 "Result port of ExtFn {name} has to be compatible with ~N32 but has type {out_ty}"
               ))?;
             } else {
-              out_ty.compatible_with(&TypeChecker::IO_IN_TYPE).context(format!(
+              out_ty.compatible_with(&Type::In(PrimitiveType::IO)).context(format!(
                 "Result port of ExtFn {name} has to be compatible with ~IO but has type {out_ty}"
               ))?;
             }
@@ -263,7 +255,7 @@ impl<'a> TypeChecker<'a> {
         }
       }
       TreeNode::Branch(zero, positive, out) => {
-        ty.compatible_with(&TypeChecker::N32_IN_TYPE)
+        ty.compatible_with(&Type::In(PrimitiveType::N32))
           .context(format!("Type of {tree} needs to be compatible with ~N32 but got {ty}"))?;
         let zero_ty = zero.ty.to_owned().ok_or(anyhow!("Zero child of {tree} has no type"))?;
         let positive_ty =

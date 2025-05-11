@@ -1,5 +1,5 @@
-::main {
-  _:IO-
+::main : ~IO {
+  _
   ::fn_swap = tup(a:fn(N32+, N32-) b:fn(N32+, N32-))
   ::compose = fn(a:fn(N32- <> N32+) fn(b:fn(N32- <> N32+) _:fn(N32+, N32-)))
 }

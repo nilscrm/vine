@@ -1,0 +1,8 @@
+Error: Cycle detected in flow graph:
+::foo:fn(tup(~N32 ~N32) tup(N32 N32))
+::foo:fn(tup(~N32 ~N32) tup(N32 N32))
+y:~N32
+y:N32
+x:~N32
+x:N32
+

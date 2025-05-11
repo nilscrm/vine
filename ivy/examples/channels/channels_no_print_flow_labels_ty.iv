@@ -1,0 +1,18 @@
+
+::In::send : fn(N32 fn(~N32 N32)) {
+  fn(n0 fn(n0 0))
+}
+
+::Out::receive : fn(~N32 N32) { fn(w0 w0) }
+
+::new_channel : tup(~N32 N32) { tup(n0 n0) }
+
+::new_channels : tup(tup(~N32'a N32'a) tup(~N32'b N32'b)) { tup(::new_channel ::new_channel) }
+
+::main : ~IO {
+  _
+  ::new_channels = tup(tup(in1:N32 out1:~N32) tup(in2:N32 _:~N32))
+  ::In::send = fn(in1:~N32 fn(42 _:~N32))
+  ::Out::receive = fn(out1:N32 w17:~N32)
+  ::In::send = fn(in2:~N32 fn(w17:N32 _:~N32))
+}

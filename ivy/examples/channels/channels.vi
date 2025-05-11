@@ -1,0 +1,34 @@
+
+struct In[T](~T);
+struct Out[T](T);
+
+mod In {
+  pub fn .send[T](In[T](channel), val: T) {
+    channel = move ~val;
+  }
+}
+
+mod Out {
+  pub fn .receive[T](Out[T](channel)) -> T {
+    channel
+  }
+}
+
+pub fn new_channel[T]() -> (In[T], Out[T]) {
+  let out;
+  let input = move ~out;
+  (In(input), Out(out))
+}
+
+pub fn new_channels[T]() -> ((In[T], Out[T]), (In[T], Out[T])) {
+  let (in1, out1) = new_channel[T]();
+  let (in2, out2) = new_channel[T]();
+  ((in1, out1), (in2, out2))
+}
+
+pub fn main(&io: &IO) {
+  let ((in1, out1), (in2, out2)) = new_channels[N32]();
+  in1.send(42);
+  in2.send(out1.receive());
+  // io.println("{out2.receive()}");
+}

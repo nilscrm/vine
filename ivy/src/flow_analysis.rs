@@ -6,10 +6,11 @@ use std::{
 
 use anyhow::{bail, Ok, Result};
 
-use crate::ast::{FlowLabel, Net, Nets, Tree, TreeNode, Type};
+use crate::ast::{FlowLabel, Net, NetType, Nets, Tree, TreeNode, Type};
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct FlowAnalysis<'ast> {
+  net_types: &'ast HashMap<String, NetType>,
   flow_nodes: Vec<FlowNode<'ast>>,
   var_flow: HashMap<String, Flow>,
 }
@@ -59,7 +60,6 @@ impl Error for FlowError {}
 #[derive(Debug, Clone)]
 pub struct FlowNode<'ast> {
   tree: &'ast Tree,
-  flow_labels: Vec<FlowLabel>,
   neighbors: Vec<usize>,
   num_incoming_edges: u32,
 }
@@ -77,29 +77,19 @@ enum Flow {
   },
 }
 
-impl Flow {
-  pub fn flow_nodes(&self) -> Vec<usize> {
-    match self {
-      Flow::In(node) | Flow::Out(node) => vec![*node],
-      Flow::Pair { left, right, .. } => {
-        let mut nodes = left.flow_nodes();
-        nodes.extend(right.flow_nodes());
-        nodes
-      }
-    }
-  }
-}
-
 impl<'ast> FlowAnalysis<'ast> {
   pub fn analyze_nets(nets: &Nets) -> Result<()> {
+    let net_types =
+      nets.iter().map(|(name, net)| (name.to_owned(), net.net_type.to_owned())).collect();
     for net in nets.values() {
-      FlowAnalysis::analyze_net(net)?;
+      FlowAnalysis::analyze_net(net, &net_types)?;
     }
     Ok(())
   }
 
-  pub fn analyze_net(net: &Net) -> Result<()> {
-    let mut flow_analysis = FlowAnalysis::default();
+  pub fn analyze_net(net: &Net, net_types: &HashMap<String, NetType>) -> Result<()> {
+    let mut flow_analysis =
+      FlowAnalysis { net_types, flow_nodes: Vec::new(), var_flow: HashMap::new() };
     for (tree1, tree2) in &net.pairs {
       let flow1 = flow_analysis.build_flow_graph_tree(tree1);
       let flow2 = flow_analysis.build_flow_graph_tree(tree2);
@@ -108,18 +98,14 @@ impl<'ast> FlowAnalysis<'ast> {
     let root_flow = flow_analysis.build_flow_graph_tree(&net.root);
 
     flow_analysis.detect_cycles()?;
-    flow_analysis.detect_incorrect_flow(&root_flow)
+    flow_analysis.check_flow_labels(&root_flow, &net.net_type)
   }
 
   fn build_flow_graph_tree(&mut self, tree: &'ast Tree) -> Flow {
     let ty = tree.ty.as_ref().unwrap();
     match &tree.tree_node {
       TreeNode::Erase | TreeNode::N32(_) | TreeNode::F32(_) => self.flow_from_type(ty, tree),
-      TreeNode::Global(_) => {
-        let flow = self.flow_from_type(ty, tree);
-        self.connect_flow_according_to_flow_labels(&flow);
-        flow
-      }
+      TreeNode::Global(name) => self.flow_from_net_type(&self.net_types[name], tree),
       TreeNode::Var(name) => {
         let flow = self.flow_from_type(ty, tree);
         match self.var_flow.remove(name) {
@@ -170,21 +156,21 @@ impl<'ast> FlowAnalysis<'ast> {
     }
   }
 
-  fn new_node(&mut self, tree: &'ast Tree, flow_labels: Vec<FlowLabel>) -> usize {
+  fn new_node(&mut self, tree: &'ast Tree) -> usize {
     let id = self.flow_nodes.len();
-    let node = FlowNode { tree, flow_labels, neighbors: Vec::new(), num_incoming_edges: 0 };
+    let node = FlowNode { tree, neighbors: Vec::new(), num_incoming_edges: 0 };
     self.flow_nodes.push(node);
     id
   }
 
   fn flow_from_type(&mut self, ty: &'ast Type, tree: &'ast Tree) -> Flow {
     match ty {
-      Type::Out { prim_ty: _, flow } => {
-        let node_id = self.new_node(tree, flow.to_owned());
+      Type::Out(_) => {
+        let node_id = self.new_node(tree);
         Flow::Out(node_id)
       }
-      Type::In { prim_ty: _, flow } => {
-        let node_id = self.new_node(tree, vec![flow.clone()]);
+      Type::In(_) => {
+        let node_id = self.new_node(tree);
         Flow::In(node_id)
       }
       Type::Pair { label, left, right } => {
@@ -199,46 +185,50 @@ impl<'ast> FlowAnalysis<'ast> {
     }
   }
 
-  fn connect_flow_according_to_flow_labels(&mut self, flow: &Flow) {
-    // Map from each flow label to the In flow nodes that have that flow label
+  fn flow_from_net_type(&mut self, net_type: &NetType, tree: &'ast Tree) -> Flow {
     let mut flows_in = HashMap::<FlowLabel, HashSet<usize>>::new();
-    // Map from each flow label to the Out flow nodes that have that flow label
     let mut flows_out = HashMap::<FlowLabel, HashSet<usize>>::new();
-    self.connect_flow_according_to_flow_labels_aux(flow, &mut flows_in, &mut flows_out);
+    self.flow_from_net_type_aux(net_type, tree, &mut flows_in, &mut flows_out)
   }
 
-  fn connect_flow_according_to_flow_labels_aux(
+  fn flow_from_net_type_aux(
     &mut self,
-    flow: &Flow,
+    net_type: &NetType,
+    tree: &'ast Tree,
     flows_in: &mut HashMap<FlowLabel, HashSet<usize>>,
     flows_out: &mut HashMap<FlowLabel, HashSet<usize>>,
-  ) {
-    match flow {
-      Flow::In(node) => {
-        let flow_labels = self.flow_nodes[*node].flow_labels.to_owned();
-        for flow_label in flow_labels {
-          if let Some(out_nodes) = flows_out.get(&flow_label) {
-            for out_node in out_nodes {
-              self.add_flow_edge(*node, *out_node);
-            }
+  ) -> Flow {
+    match net_type {
+      NetType::In { ty: _, flow_label } => {
+        let node_id = self.new_node(tree);
+        flows_in.entry(flow_label.to_owned()).or_default().insert(node_id);
+        if let Some(out_nodes) = flows_out.get(flow_label) {
+          for out_node in out_nodes {
+            self.add_flow_edge(node_id, *out_node);
           }
-          flows_in.entry(flow_label).or_default().insert(*node);
         }
+        Flow::In(node_id)
       }
-      Flow::Out(node) => {
-        let flow_labels = self.flow_nodes[*node].flow_labels.to_owned();
+      NetType::Out { ty: _, flow_labels } => {
+        let node_id = self.new_node(tree);
         for flow_label in flow_labels {
-          if let Some(in_nodes) = flows_in.get(&flow_label) {
+          flows_out.entry(flow_label.to_owned()).or_default().insert(node_id);
+          if let Some(in_nodes) = flows_in.get(flow_label) {
             for in_node in in_nodes {
-              self.add_flow_edge(*in_node, *node);
+              self.add_flow_edge(*in_node, node_id);
             }
           }
-          flows_out.entry(flow_label).or_default().insert(*node);
         }
+        Flow::Out(node_id)
       }
-      Flow::Pair { left, right, .. } => {
-        self.connect_flow_according_to_flow_labels_aux(left, flows_in, flows_out);
-        self.connect_flow_according_to_flow_labels_aux(right, flows_in, flows_out);
+      NetType::Pair { label, left, right } => {
+        let left_flow = self.flow_from_net_type_aux(left, tree, flows_in, flows_out);
+        let right_flow = self.flow_from_net_type_aux(right, tree, flows_in, flows_out);
+        Flow::Pair {
+          label: label.to_owned(),
+          left: Box::new(left_flow),
+          right: Box::new(right_flow),
+        }
       }
     }
   }
@@ -377,27 +367,56 @@ impl<'ast> FlowAnalysis<'ast> {
     Ok(())
   }
 
-  fn detect_incorrect_flow(&self, root_flow: &Flow) -> Result<()> {
-    // Start with all root nodes that don't have incoming edges
-    let mut todo = root_flow
-      .flow_nodes()
-      .into_iter()
-      .filter(|node_idx| self.flow_nodes[*node_idx].num_incoming_edges == 0)
-      .collect::<Vec<_>>();
+  fn root_flow_labels(
+    root_flow: &Flow,
+    net_type: &NetType,
+  ) -> (HashMap<usize, FlowLabel>, HashMap<usize, Vec<FlowLabel>>) {
+    match (root_flow, net_type) {
+      (Flow::In(node_idx), NetType::In { flow_label, .. }) => {
+        let mut in_flow_labels = HashMap::<usize, FlowLabel>::new();
+        in_flow_labels.insert(*node_idx, flow_label.to_owned());
+        (in_flow_labels, HashMap::new())
+      }
+      (Flow::Out(node_idx), NetType::Out { flow_labels, .. }) => {
+        let mut out_flow_labels = HashMap::<usize, Vec<FlowLabel>>::new();
+        out_flow_labels.insert(*node_idx, flow_labels.to_owned());
+        (HashMap::new(), out_flow_labels)
+      }
+      (
+        Flow::Pair { left, right, .. },
+        NetType::Pair { label: _, left: left_net_type, right: right_net_type },
+      ) => {
+        let (mut left_in_flow_labels, mut left_out_flow_labels) =
+          FlowAnalysis::root_flow_labels(left, left_net_type);
+        let (right_in_flow_labels, right_out_flow_labels) =
+          FlowAnalysis::root_flow_labels(right, right_net_type);
+        left_in_flow_labels.extend(right_in_flow_labels);
+        left_out_flow_labels.extend(right_out_flow_labels);
+        (left_in_flow_labels, left_out_flow_labels)
+      }
+      _ => unreachable!(
+        "Root flow did not match the net type. This should have been checked by the type checker"
+      ),
+    }
+  }
 
-    let mut flows = HashMap::<usize, HashSet<FlowLabel>>::new();
-    for node_idx in &todo {
-      let flow_labels = self.flow_nodes[*node_idx].flow_labels.to_owned();
-      flows.entry(*node_idx).or_default().extend(flow_labels);
+  fn check_flow_labels(&self, root_flow: &Flow, net_type: &NetType) -> Result<()> {
+    let (root_in_flow_labels, root_out_flow_labels) =
+      FlowAnalysis::root_flow_labels(root_flow, net_type);
+    let mut todo = Vec::new();
+    let mut flows = vec![HashSet::<FlowLabel>::new(); self.flow_nodes.len()];
+    for (node_index, flow_label) in root_in_flow_labels {
+      todo.push(node_index);
+      flows[node_index].insert(flow_label);
     }
 
     let mut num_unprocessed_predecessors =
       self.flow_nodes.iter().map(|node| node.num_incoming_edges).collect::<Vec<_>>();
 
     while let Some(node_idx) = todo.pop() {
-      let node_flow = flows.get(&node_idx).unwrap().to_owned();
+      let node_flow = flows[node_idx].clone();
       for neighbor_idx in &self.flow_nodes[node_idx].neighbors {
-        flows.entry(*neighbor_idx).or_default().extend(node_flow.clone());
+        flows[*neighbor_idx].extend(node_flow.clone());
         num_unprocessed_predecessors[*neighbor_idx] -= 1;
         if num_unprocessed_predecessors[*neighbor_idx] == 0 {
           todo.push(*neighbor_idx);
@@ -405,17 +424,13 @@ impl<'ast> FlowAnalysis<'ast> {
       }
     }
 
-    for node in root_flow.flow_nodes() {
-      let flow_labels = &self.flow_nodes[node].flow_labels;
-      // Check that only the annotated flow labels can actually reach that node
-      if let Some(reaching_flow_labels) = flows.get(&node) {
-        for reaching_flow_label in reaching_flow_labels {
-          if !flow_labels.contains(reaching_flow_label) {
-            bail!(FlowError::IncompatibleFlowLabel {
-              incompatible_flow_label: reaching_flow_label.to_owned(),
-              tree: self.flow_nodes[node].tree.clone()
-            });
-          }
+    for (node_index, flow_labels) in root_out_flow_labels {
+      for reaching_flow_label in flows[node_index].iter() {
+        if !flow_labels.contains(reaching_flow_label) {
+          bail!(FlowError::IncompatibleFlowLabel {
+            incompatible_flow_label: reaching_flow_label.to_owned(),
+            tree: self.flow_nodes[node_index].tree.clone()
+          });
         }
       }
     }

@@ -1,0 +1,15 @@
+
+::main {
+  _
+  ::inc_pair = _
+}
+
+::inc_pair {
+  tup(x y)
+  ::inc_pair::inc = fn(ref(0 x) y)
+}
+
+::inc_pair::inc {
+  fn(ref(@n32_add(1 dup(x1 x2)) x1) x2)
+}
+

@@ -6,7 +6,7 @@ use vine_util::{
 };
 
 use crate::{
-  ast::{FlowLabel, Net, Nets, PrimitiveType, Tree, TreeNode, Type},
+  ast::{FlowLabel, Net, NetType, Nets, PrimitiveType, Tree, TreeNode, Type},
   lexer::Token,
 };
 
@@ -49,7 +49,9 @@ impl<'src> IvyParser<'src> {
     let mut nets = Nets::default();
     while parser.state.token.is_some() {
       let name = parser.expect(Token::Global)?.to_owned();
-      let net = parser.parse_net()?;
+      parser.expect(Token::Colon)?;
+      let net_type = parser.parse_net_type()?;
+      let net = parser.parse_net(net_type)?;
       nets.insert(name, net);
     }
     Ok(nets)
@@ -65,21 +67,21 @@ impl<'src> IvyParser<'src> {
     self.parse_f32_like(token, ParseError::InvalidNum)
   }
 
-  fn parse_net(&mut self) -> Parse<'src, Net> {
+  fn parse_net(&mut self, net_type: NetType) -> Parse<'src, Net> {
     self.expect(Token::OpenBrace)?;
-    let net = self.parse_net_inner()?;
+    let net = self.parse_net_inner(net_type)?;
     self.expect(Token::CloseBrace)?;
     Ok(net)
   }
 
   #[doc(hidden)] // used by Vine to parse `inline_ivy!`
-  pub fn parse_net_inner(&mut self) -> Parse<'src, Net> {
+  pub fn parse_net_inner(&mut self, net_type: NetType) -> Parse<'src, Net> {
     let root = self.parse_tree()?;
     let mut pairs = Vec::new();
     while !self.check(Token::CloseBrace) {
       pairs.push(self.parse_pair()?);
     }
-    Ok(Net { root, pairs })
+    Ok(Net { net_type, root, pairs })
   }
 
   pub(super) fn parse_pair(&mut self) -> Parse<'src, (Tree, Tree)> {
@@ -159,24 +161,24 @@ impl<'src> IvyParser<'src> {
     self.unexpected()
   }
 
-  fn parse_type(&mut self) -> Parse<'src, Type> {
+  fn parse_net_type(&mut self) -> Parse<'src, NetType> {
     if self.check(Token::Ident) {
       let label = self.expect(Token::Ident)?.to_owned();
       self.expect(Token::OpenParen)?;
-      let left = self.parse_type()?;
-      let right = self.parse_type()?;
+      let left = self.parse_net_type()?;
+      let right = self.parse_net_type()?;
       self.expect(Token::CloseParen)?;
-      Ok(Type::Pair { label, left: Box::new(left), right: Box::new(right) })
+      Ok(NetType::Pair { label, left: Box::new(left), right: Box::new(right) })
     } else if self.eat(Token::Tilde)? {
-      let prim_ty = self.parse_primitive_type()?;
+      let ty = self.parse_primitive_type()?;
       let flow = if self.eat(Token::SingleQuote)? {
         FlowLabel::Label(self.expect(Token::Ident)?.to_string())
       } else {
         FlowLabel::Default
       };
-      Ok(Type::In { prim_ty, flow })
+      Ok(NetType::In { ty, flow_label: flow })
     } else {
-      let primitive_type = self.parse_primitive_type()?;
+      let ty = self.parse_primitive_type()?;
       let mut flow_labels = vec![];
       // If there is not flow label use the default one
       if !self.check(Token::SingleQuote) {
@@ -186,7 +188,24 @@ impl<'src> IvyParser<'src> {
         let flow_label = self.expect(Token::Ident)?.to_string();
         flow_labels.push(FlowLabel::Label(flow_label));
       }
-      Ok(Type::Out { prim_ty: primitive_type, flow: flow_labels })
+      Ok(NetType::Out { ty, flow_labels })
+    }
+  }
+
+  fn parse_type(&mut self) -> Parse<'src, Type> {
+    if self.check(Token::Ident) {
+      let label = self.expect(Token::Ident)?.to_owned();
+      self.expect(Token::OpenParen)?;
+      let left = self.parse_type()?;
+      let right = self.parse_type()?;
+      self.expect(Token::CloseParen)?;
+      Ok(Type::Pair { label, left: Box::new(left), right: Box::new(right) })
+    } else if self.eat(Token::Tilde)? {
+      let ty = self.parse_primitive_type()?;
+      Ok(Type::In(ty))
+    } else {
+      let ty = self.parse_primitive_type()?;
+      Ok(Type::Out(ty))
     }
   }
 

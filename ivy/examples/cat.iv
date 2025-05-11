@@ -1,16 +1,15 @@
-
-::main {
+::main : fn(dup(~IO ~IO) ~IO) {
   fn(dup(io0 io1) _)
-  io0 = @io_read_byte(0 dup(byte0 byte1))
-  byte0 = ?(::main::a ::main::b tup(byte1 io1))
+  io0:IO = @io_read_byte(0 dup(byte0:~N32 byte1:~N32))
+  byte0:N32 = ?(::main::a ::main::b tup(byte1:N32 io1:IO))
 }
 
-::main::a {
+::main::a : tup(~N32 ~IO) {
   tup(_ @io_flush(0 _))
 }
 
-::main::b {
+::main::b : tup(~N32 ~IO) {
   tup(byte io0)
-  io0 = @io_print_byte(byte io1)
-  ::main = fn(io1 _)
+  io0:IO = @io_print_byte(byte io1)
+  ::main = fn(io1:IO _:IO)
 }

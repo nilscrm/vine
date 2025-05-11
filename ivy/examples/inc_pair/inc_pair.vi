@@ -1,0 +1,15 @@
+
+pub fn main(&io: &IO) {
+  inc_pair();
+}
+
+fn inc_pair() -> (N32, N32) {
+  let x = 0;
+  let y = inc(&x);
+  (x, y)
+}
+
+fn inc(&x: &N32) -> N32 {
+  x += 1;
+  x
+}

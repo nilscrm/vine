@@ -1,0 +1,86 @@
+
+use std::data::Array;
+
+struct Node {
+  incoming_edges: Array[F32],
+  outgoing_edges: Array[~F32],
+  page_rank: F32,
+}
+
+pub mod Node {
+  pub fn new(total_num_nodes: N32) -> Node {
+    Node({
+      incoming_edges: Array::empty,
+      outgoing_edges: Array::empty,
+      page_rank: 1.0 / total_num_nodes as F32,
+    })
+  }
+
+  pub fn .process(
+    &Node({ incoming_edges, outgoing_edges, page_rank }),
+    num_nodes: N32,
+    damping: F32,
+  ) {
+    // Send current page rank value to all neighbors
+    let s = 0;
+    let num_outgoing_edges = outgoing_edges.len();
+    outgoing_edges.for_each[~F32, N32](
+      &s,
+      fn(_: &N32, ~outgoing_edge: ~F32) {
+        outgoing_edge = damping * page_rank / num_outgoing_edges as F32;
+      },
+    );
+    // Update page rank based on incoming values
+    let new_pr = (1.0 - damping) / num_nodes as F32;
+    new_pr = incoming_edges.fold_front(new_pr, F32::add::add);
+    page_rank = new_pr;
+  }
+
+  pub fn connect(&node1: &Node, &node2: &Node) {
+    let incoming: F32;
+    let outgoing: ~F32 = ~incoming;
+    node1.outgoing_edges.push_back(outgoing);
+    node2.incoming_edges.push_back(incoming);
+  }
+
+  pub fn .get_page_rank(&Node({ incoming_edges, outgoing_edges, page_rank })) -> F32 {
+    page_rank
+  }
+}
+
+pub fn main(&io: &IO) {
+  let num_nodes = 4;
+  let a = Node::new(num_nodes);
+  let b = Node::new(num_nodes);
+  let c = Node::new(num_nodes);
+  let d = Node::new(num_nodes);
+
+  Node::connect(&a, &b);
+  Node::connect(&a, &c);
+  Node::connect(&b, &a);
+  Node::connect(&b, &c);
+  Node::connect(&b, &d);
+  Node::connect(&c, &a);
+  Node::connect(&d, &c);
+
+  let damping = 0.85;
+  let n = 0;
+  while n < 2 {
+    io.println("Node A: {a.get_page_rank()}");
+    io.println("Node B: {b.get_page_rank()}");
+    io.println("Node C: {c.get_page_rank()}");
+    io.println("Node D: {d.get_page_rank()}");
+    io.println("");
+    a.process(num_nodes, damping);
+    b.process(num_nodes, damping);
+    c.process(num_nodes, damping);
+    d.process(num_nodes, damping);
+    n += 1;
+  }
+
+  io.println("Node A: {a.page_rank}");
+  io.println("Node B: {b.page_rank}");
+  io.println("Node C: {c.page_rank}");
+  io.println("Node D: {d.page_rank}");
+  io.println("");
+}

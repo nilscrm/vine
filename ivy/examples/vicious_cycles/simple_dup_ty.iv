@@ -1,4 +1,4 @@
-::main {
-  _ : ~IO
+::main : ~IO {
+  _
   dup(a:N32 b:N32) = dup(a:~N32 b:~N32)
 }

@@ -1,0 +1,17 @@
+
+::In::send { fn(n0 fn(n0 0)) }
+
+::Out::receive { fn(w0 w0) }
+
+::new_channel { tup(n0 n0) }
+
+::new_channels { tup(::new_channel ::new_channel) }
+
+::main {
+  fn(ref(w1 w1) _)
+  ::new_channels = tup(tup(in1 out1) tup(in2 _))
+  ::In::send = fn(in1 fn(42 _))
+  ::Out::receive = fn(out1 w17)
+  ::In::send = fn(in2 fn(w17 _))
+}
+
