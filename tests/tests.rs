@@ -31,6 +31,7 @@ fn tests(t: &mut DynTester) {
   t.group("fail", |t| {
     test_iv_fail(t, "ivy/examples/vicious_cycles/swap_tuple_ty.iv");
     test_iv_fail(t, "ivy/examples/vicious_cycles/simple_dup_ty.iv");
+    test_iv_fail(t, "ivy/examples/vicious_cycles/add_ref_incorrect/add_ref_incorrect_ty.iv");
   });
 }
 

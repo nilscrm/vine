@@ -1,0 +1,11 @@
+
+::main {
+  fn(ref(io io) _)
+  ::add_ref = fn(ref(1 _) fn(ref(2 b) ref(_ c)))
+  @n32_add(1 c) = b
+}
+
+::add_ref {
+  fn(ref(a1 a2) fn(ref(dup4(b1 b2) b3) ref(b2 b3)))
+  @n32_add(b1 a2) = a1
+}

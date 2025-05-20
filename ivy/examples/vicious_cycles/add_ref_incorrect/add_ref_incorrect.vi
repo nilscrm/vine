@@ -1,0 +1,12 @@
+
+pub fn main(&io: &IO) {
+  let a = 1;
+  let b = 2;
+  let &c = add_ref(&a, &b);
+  c += b;
+}
+
+fn add_ref(&a: &N32, &b: &N32) -> &N32 {
+  a += b;
+  &b
+}

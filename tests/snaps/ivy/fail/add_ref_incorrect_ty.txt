@@ -1,0 +1,9 @@
+Error: Cycle detected in flow graph:
+::add_ref:fn(ref(~N32 N32) fn(ref(dup(~N32 ~N32) N32) ref(N32 ~N32)))
+b:~N32
+b:N32
+@n32_add(1:N32 c:~N32):~N32
+c:~N32
+c:N32
+::add_ref:fn(ref(~N32 N32) fn(ref(dup(~N32 ~N32) N32) ref(N32 ~N32)))
+

@@ -28,11 +28,4 @@
   "rust-analyzer.check.command": "clippy",
   "editor.formatOnSave": true,
   "editor.tabSize": 2,
-  "github.copilot.enable": {
-    "*": true,
-    "plaintext": false,
-    "markdown": false,
-    "scminput": false,
-    "coq": false
-  }
 }
