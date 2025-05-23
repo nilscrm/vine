@@ -182,7 +182,7 @@ impl<'l, 'ast, 'ivm> Serializer<'l, 'ast, 'ivm> {
   fn serialize_tree(&mut self, tree: &'ast TreeNode) -> Register {
     let tree = self.unbox(tree);
     if let TreeNode::Var(var) = &tree {
-      *self.registers.entry(&var).or_insert_with(|| self.current.instructions.new_register())
+      *self.registers.entry(var).or_insert_with(|| self.current.instructions.new_register())
     } else {
       let r = self.current.instructions.new_register();
       self.serialize_tree_to(tree, r);
