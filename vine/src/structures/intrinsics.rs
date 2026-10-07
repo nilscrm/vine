@@ -108,6 +108,15 @@ intrinsics! {
   BoolLe = "bool:le",
   BoolToN32 = "bool:to_n32",
 
+  HoleNew = "hole:new",
+  HoleSet = "hole:set",
+  HoleIntoSpace = "hole:into_space",
+  PromiseOf = "promise:of",
+  PromiseGet = "promise:get",
+  PromiseForward = "promise:forward",
+  PromiseLink = "promise:link",
+  PromiseAsRef = "promise:as_ref",
+
   IoPrintChar = "io:print_char",
   IoPrintByte = "io:print_byte",
   IoFlush = "io:flush",

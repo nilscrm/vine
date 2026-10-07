@@ -10,4 +10,7 @@ pub mod Set;
 
 pub mod Heap;
 
+pub mod Hole;
+pub mod Promise;
+
 pub mod Iterator;

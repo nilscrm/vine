@@ -1,7 +1,7 @@
 
-use data::Iterator::{Iterator, Collect, Iterate};
+use data::{Hole, Iterator::{Iterator, Collect, Iterate}, Promise};
 use ops::{Cast, Concat, Range::{Range, Bound}};
-use util::{duplicate, erase};
+use util::erase;
 
 /// A linear collection of `T`.
 ///
@@ -25,11 +25,11 @@ use util::{duplicate, erase};
 ///
 /// If frequently accessing elements by index, consider using an array instead.
 #[builtin = "List"]
-pub struct List[T](pub.root (N32, Stream[T], ~Stream[T]));
+pub struct List[T](pub.root (N32, Promise[Stream[T]], Hole[Stream[T]]));
 
 pub.root unsafe enum Stream[T] {
   done(),
-  more(T, Stream[T]),
+  more(T, Promise[Stream[T]]),
 }
 
 pub mod List {
@@ -52,7 +52,7 @@ pub mod List {
   pub fn new[T*](len: N32, value: T) -> List[T] {
     let (front, back) = Stream::pair;
     for _ in 0..len {
-      back.push(value);
+      Stream::push_back(&back, value);
     }
     List(len, front, back)
   }
@@ -67,7 +67,7 @@ pub mod List {
   pub fn from_fn[T, F*; fn F() -> T](len: N32, f: F) -> List[T] {
     let (front, back) = Stream::pair;
     for _ in 0..len {
-      back.push(f());
+      Stream::push_back(&back, f());
     }
     List(len, front, back)
   }
@@ -84,9 +84,9 @@ pub mod List {
     assert i < len else { None() }
     let cursor = &front;
     for _ in 0..i {
-      cursor = safe cursor.*.tail();
+      cursor = safe Stream::tail(cursor);
     }
-    Some(safe cursor.*.head())
+    Some(safe Stream::head(cursor))
   }
 
   /// Get the `i`th element of the list. `O(i)`
@@ -137,7 +137,7 @@ pub mod List {
     let len = self.len();
     let (front, back) = Stream::pair;
     for val in self {
-      back.push(f(val));
+      Stream::push_back(&back, f(val));
     }
     List(len, front, back)
   }
@@ -146,7 +146,7 @@ pub mod List {
     let len = self.len();
     let (front, back) = Stream::pair;
     for &val in &self {
-      back.push(f(&val));
+      Stream::push_back(&back, f(&val));
     }
     List(len, front, back)
   }
@@ -164,23 +164,23 @@ pub mod List {
   pub fn .pop_front[T](&List[T](len, front, _)) -> Option[T] {
     if len != 0 {
       len -= 1;
-      Some(safe front.pop())
+      Some(safe Stream::pop(&front))
     }
   }
 
   pub fn .head_tail[T](List[T](len, front, back)) -> Option[(T, List[T])] {
     if len != 0 {
-      let head = safe front.pop();
+      let head = safe Stream::pop(&front);
       Some(head, List(len - 1, front, back))
     } else {
-      safe (Stream::done(), ~Stream::done()) = (front, back);
+      safe Stream::close(front, back);
       None()
     }
   }
 
   pub impl [T]: Concat[List[T], List[T], List[T]] {
     fn concat(List[T](a_len, a_front, a_back), List[T](b_len, b_front, b_back)) -> List[T] {
-      ~a_back = b_front;
+      b_front.link(a_back);
       List(a_len + b_len, a_front, b_back)
     }
   }
@@ -218,9 +218,9 @@ pub mod List {
     let &List(len, front, _) = &list;
     let cursor = &front;
     for _ in 0..i {
-      cursor = safe cursor.*.tail();
+      cursor = safe Stream::tail(cursor);
     }
-    cursor.*.push(el);
+    Stream::push_front(cursor, el);
     len += 1;
   }
 
@@ -383,10 +383,10 @@ pub mod List {
     pub impl [T]: Iterator[Iter[T], T] {
       fn advance(Iter[T](List(len, front, back))) -> Option[(T, Iter[T])] {
         if len != 0 {
-          let head = safe front.pop();
+          let head = safe Stream::pop(&front);
           Some(head, Iter(List(len - 1, front, back)))
         } else {
-          safe (Stream::done(), ~Stream::done()) = (front, back);
+          safe Stream::close(front, back);
           None()
         }
       }
@@ -414,14 +414,14 @@ pub mod List {
     }
   }
 
-  pub struct IterRef[T](N32, &Stream[T]);
+  pub struct IterRef[T](N32, &Promise[Stream[T]]);
 
   pub mod IterRef {
     pub impl [T]: Iterator[IterRef[T], &T] {
       fn advance(IterRef[T](len, cursor)) -> Option[(&T, IterRef[T])] {
         if len != 0 {
-          let head = safe cursor.*.head();
-          Some(head, IterRef(len - 1, safe cursor.*.tail()))
+          let head = safe Stream::head(&cursor.*);
+          Some(head, IterRef(len - 1, safe Stream::tail(&cursor.*)))
         }
       }
     }
@@ -453,7 +453,7 @@ pub mod List {
     let len = self.len();
     let (front, back) = Stream::pair;
     for value in self {
-      front.push(value);
+      Stream::push_front(&front, value);
     }
     List(len, front, back)
   }
@@ -517,14 +517,12 @@ pub mod List {
     }
   }
 
-  #[safe become(duplicate)]
   pub impl [T+]: Fork[List[T]] {
     fn fork(&self: &List[T]) -> List[T] {
       self.map_ref(Fork::fork)
     }
   }
 
-  #[safe become(erase)]
   pub impl [T?]: Drop[List[T]] {
     fn drop(self: List[T]) {
       for _ in self {}
@@ -533,36 +531,43 @@ pub mod List {
 }
 
 pub.root mod Stream {
-  pub const pair[T]: (Stream[T], ~Stream[T]) = do {
-    let loop stream;
-    (stream, ~stream)
-  };
+  /// An empty stream: its front, and the hole at its end.
+  pub const pair[T]: (Promise[Stream[T]], Hole[Stream[T]]) = Hole::new();
 
-  pub fn .push[T](&stream: &Stream[T], value: T) {
-    stream = safe Stream::more(value, stream);
+  /// Appends `value` at the end of the stream, `back` being the hole at its
+  /// end.
+  pub fn push_back[T](&back: &Hole[Stream[T]], value: T) {
+    let old = back;
+    let (front, hole) = Hole::new();
+    old.set(safe Stream::more(value, front));
+    back = hole;
   }
 
-  pub unsafe fn .pop[T](&stream: &Stream[T]) -> T {
-    let Stream::more(head, tail) = stream;
-    stream = tail;
+  /// Prepends `value` to the stream starting at `front`.
+  pub fn push_front[T](&front: &Promise[Stream[T]], value: T) {
+    front = Promise::of(safe Stream::more(value, front));
+  }
+
+  pub unsafe fn pop[T](&front: &Promise[Stream[T]]) -> T {
+    let Stream::more(head, tail) = front.get();
+    front = tail;
     head
   }
 
-  pub unsafe fn .head[T](&stream: &Stream[T]) -> &T {
-    let &Stream::more(head, _) = &stream;
+  pub unsafe fn head[T](&front: &Promise[Stream[T]]) -> &T {
+    let &Stream::more(head, _) = front.as_ref();
     &head
   }
 
-  pub unsafe fn .tail[T](&stream: &Stream[T]) -> &Stream[T] {
-    let &Stream::more(_, tail) = &stream;
+  pub unsafe fn tail[T](&front: &Promise[Stream[T]]) -> &Promise[Stream[T]] {
+    let &Stream::more(_, tail) = front.as_ref();
     &tail
   }
 
-  pub use back::push as _;
-
-  pub mod back {
-    pub fn .push[T](&~stream: &~Stream[T], value: T) {
-      stream.push(value);
-    }
+  /// Closes an empty stream, `front` being its front and `back` the hole at
+  /// its end.
+  pub unsafe fn close[T](front: Promise[Stream[T]], back: Hole[Stream[T]]) {
+    back.set(Stream::done());
+    Stream::done() = front.get();
   }
 }

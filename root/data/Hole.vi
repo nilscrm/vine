@@ -1,0 +1,36 @@
+
+use data::Promise;
+use util::transmute;
+
+/// The write end of a single-use slot for a value of type `T`. Each `Hole`
+/// must be filled exactly once, with `.set`; the value can then be read from
+/// the corresponding `Promise`.
+/// ```vi
+/// let (promise, hole) = Hole::new[N32]();
+/// hole.set(46);
+/// promise.get() // 46
+/// ```
+pub type Hole[T];
+
+pub mod Hole {
+  /// Creates a new, empty slot, returning its read end and its write end.
+  #[intrinsic = "hole:new"]
+  pub fn new[T]() -> (Promise[T], Hole[T]) {
+    let loop value;
+    (safe transmute[T, Promise[T]](value), safe transmute[~T, Hole[T]](~value))
+  }
+
+  /// Fills the slot with `value`.
+  #[intrinsic = "hole:set"]
+  pub fn .set[T](self: Hole[T], value: T) {
+    let space = safe transmute[Hole[T], ~T](self);
+    ~space = value;
+  }
+
+  /// Converts this `Hole` into a space; whatever is put into the space will
+  /// fill the slot.
+  #[intrinsic = "hole:into_space"]
+  pub fn .into_space[T](self: Hole[T]) -> ~T {
+    safe transmute(self)
+  }
+}
