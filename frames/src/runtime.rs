@@ -1,0 +1,472 @@
+use std::{
+  error::Error,
+  fmt,
+  io::{self, Read, Write},
+  time::{Duration, Instant},
+};
+
+use vine_util::idx::IdxVec;
+
+use crate::{
+  heap::{Addr, Heap},
+  layout::{Field, LayoutId},
+  ops::{Op, Ops},
+  program::{BlockId, Instr, IoOp, OpId, Program, Reg},
+};
+
+/// The bits of a frame header holding the number of unfilled slots.
+const COUNTER_SHIFT: u32 = 48;
+const BLOCK_MASK: u64 = (1 << COUNTER_SHIFT) - 1;
+/// The bits of a space holding the offset within the frame.
+const SPACE_OFFSET_BITS: u32 = 16;
+
+const HOLE_EMPTY: u64 = 0;
+const HOLE_FILLED: u64 = 1;
+const HOLE_WAITING: u64 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeError {
+  Panic(String),
+  InvalidOp(&'static str),
+  UnknownOp(&'static str),
+  /// The program stopped without halting, with frames still waiting.
+  Deadlock {
+    waiting: u64,
+  },
+  /// A value that cannot be copied or freed generically was copied or freed.
+  Opaque {
+    action: &'static str,
+    what: &'static str,
+  },
+  /// A hole was filled twice, or read twice.
+  HoleMisuse,
+  Io(String),
+}
+
+impl fmt::Display for RuntimeError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      RuntimeError::Panic(msg) => write!(f, "panic: {msg}"),
+      RuntimeError::InvalidOp(op) => write!(f, "invalid operands to `{op}`"),
+      RuntimeError::UnknownOp(op) => write!(f, "unknown operation `{op}`"),
+      RuntimeError::Deadlock { waiting } => {
+        write!(f, "deadlock: the program stopped with {waiting} objects still live")
+      }
+      RuntimeError::Opaque { action, what } => write!(f, "cannot {action} {what}"),
+      RuntimeError::HoleMisuse => write!(f, "hole used more than once"),
+      RuntimeError::Io(err) => write!(f, "io error: {err}"),
+    }
+  }
+}
+
+impl Error for RuntimeError {}
+
+#[derive(Debug, Default, Clone)]
+pub struct Stats {
+  pub blocks_run: u64,
+  pub instructions: u64,
+  pub frames: u64,
+  pub time: Duration,
+}
+
+pub struct Host<'a> {
+  pub stdin: Box<dyn Read + 'a>,
+  pub stdout: Box<dyn Write + 'a>,
+}
+
+impl Host<'static> {
+  pub fn stdio() -> Self {
+    Host { stdin: Box::new(io::stdin()), stdout: Box::new(io::stdout()) }
+  }
+}
+
+pub struct Runtime<'p, 'h> {
+  program: &'p Program,
+  ops: IdxVec<OpId, &'p Op>,
+  pub heap: Heap,
+  pub host: Host<'h>,
+  pub stats: Stats,
+  regs: Vec<u64>,
+  ready: Vec<Addr>,
+  halted: bool,
+  scratch: Vec<u64>,
+}
+
+impl<'p, 'h> Runtime<'p, 'h> {
+  pub fn new(program: &'p Program, ops: &'p Ops, host: Host<'h>) -> Result<Self, RuntimeError> {
+    let ops = program
+      .ops
+      .values()
+      .map(|&name| ops.get(name).ok_or(RuntimeError::UnknownOp(name)))
+      .collect::<Result<_, _>>()?;
+    Ok(Runtime {
+      program,
+      ops,
+      heap: Heap::new(),
+      host,
+      stats: Stats::default(),
+      regs: Vec::new(),
+      ready: Vec::new(),
+      halted: false,
+      scratch: Vec::new(),
+    })
+  }
+
+  /// Runs the program until there is no more work to do.
+  pub fn run(&mut self) -> Result<(), RuntimeError> {
+    let start = Instant::now();
+    let entry = self.new_frame(self.program.entry);
+    debug_assert_eq!(self.program.blocks[self.program.entry].slots, 0);
+    self.ready.push(entry);
+    let result = self.run_ready();
+    self.stats.time += start.elapsed();
+    self.host.stdout.flush().map_err(|e| RuntimeError::Io(e.to_string()))?;
+    result?;
+    if !self.halted {
+      Err(RuntimeError::Deadlock { waiting: self.heap.live_objects() })?
+    }
+    Ok(())
+  }
+
+  fn run_ready(&mut self) -> Result<(), RuntimeError> {
+    while let Some(frame) = self.ready.pop() {
+      self.run_frame(frame)?;
+    }
+    Ok(())
+  }
+
+  fn new_frame(&mut self, block_id: BlockId) -> Addr {
+    let block = &self.program.blocks[block_id];
+    let frame = self.heap.alloc(block.frame_size + 1);
+    self.heap.set(frame, ((block.slots as u64) << COUNTER_SHIFT) | block_id.0 as u64);
+    self.stats.frames += 1;
+    frame
+  }
+
+  fn fill(&mut self, frame: Addr, offset: u32, src: Reg, len: u32) {
+    let src = &self.regs[src.0 as usize..][..len as usize];
+    self.heap.slice_mut(frame.offset(offset), len).copy_from_slice(src);
+    self.decrement(frame);
+  }
+
+  fn fill_words(&mut self, frame: Addr, offset: u32, words: &[u64]) {
+    self.heap.slice_mut(frame.offset(offset), words.len() as u32).copy_from_slice(words);
+    self.decrement(frame);
+  }
+
+  fn decrement(&mut self, frame: Addr) {
+    let header = self.heap.get(frame) - (1 << COUNTER_SHIFT);
+    self.heap.set(frame, header);
+    if header >> COUNTER_SHIFT == 0 {
+      self.ready.push(frame);
+    }
+  }
+
+  fn run_frame(&mut self, frame: Addr) -> Result<(), RuntimeError> {
+    let program = self.program;
+    let block_id = BlockId((self.heap.get(frame) & BLOCK_MASK) as usize);
+    let block = &program.blocks[block_id];
+    self.stats.blocks_run += 1;
+    if self.regs.len() < block.regs as usize {
+      self.regs.resize(block.regs as usize, 0);
+    }
+    let frame_size = block.frame_size;
+    self.regs[..frame_size as usize].copy_from_slice(self.heap.slice(frame.offset(1), frame_size));
+    self.heap.free(frame, frame_size + 1);
+
+    let mut pc = 0;
+    loop {
+      self.stats.instructions += 1;
+      match &block.code[pc] {
+        Instr::Const { dst, value } => self.regs[dst.0 as usize] = *value,
+        Instr::Move { dst, src, len } => {
+          let src = src.0 as usize;
+          self.regs.copy_within(src..src + *len as usize, dst.0 as usize);
+        }
+        Instr::Op { op, args, rets } => {
+          let op = self.ops[*op];
+          let mut inputs = [0; 4];
+          for (input, arg) in inputs.iter_mut().zip(args) {
+            *input = self.regs[arg.0 as usize];
+          }
+          self.scratch.clear();
+          (op.f)(&inputs[..args.len()], &mut self.scratch)
+            .map_err(|_| RuntimeError::InvalidOp(op.name))?;
+          for (ret, &word) in rets.iter().zip(&self.scratch) {
+            self.regs[ret.0 as usize] = word;
+          }
+        }
+        Instr::Io { op, args, rets } => {
+          let args = args.iter().map(|r| self.regs[r.0 as usize]).collect::<Vec<_>>();
+          let out = self.io(*op, &args)?;
+          for (ret, word) in rets.iter().zip(out) {
+            self.regs[ret.0 as usize] = word;
+          }
+        }
+
+        Instr::Alloc { dst, len } => self.regs[dst.0 as usize] = self.heap.alloc(*len).0,
+        Instr::Free { ptr, len } => self.heap.free(self.addr(*ptr), *len),
+        Instr::Load { dst, ptr, offset, len } => {
+          let words = self.heap.slice(self.addr(*ptr).offset(*offset), *len);
+          self.regs[dst.0 as usize..][..*len as usize].copy_from_slice(words);
+        }
+        Instr::Store { ptr, offset, src, len } => {
+          let addr = self.addr(*ptr).offset(*offset);
+          let src = &self.regs[src.0 as usize..][..*len as usize];
+          self.heap.slice_mut(addr, *len).copy_from_slice(src);
+        }
+        Instr::Copy { dst, src, layout } => {
+          let size = program.layouts.layouts[*layout].size as usize;
+          let src = src.0 as usize;
+          self.regs.copy_within(src..src + size, dst.0 as usize);
+          self.deep_copy(Loc::Reg(*dst), *layout)?;
+        }
+        Instr::Erase { src, layout } => self.deep_free(Loc::Reg(*src), *layout)?,
+
+        Instr::NewFrame { dst, block } => self.regs[dst.0 as usize] = self.new_frame(*block).0,
+        Instr::Fill { frame, offset, src, len } => {
+          self.fill(self.addr(*frame), *offset, *src, *len);
+        }
+        Instr::Space { dst, frame, offset } => {
+          debug_assert!(*offset < 1 << SPACE_OFFSET_BITS);
+          let frame = self.regs[frame.0 as usize];
+          self.regs[dst.0 as usize] = (frame << SPACE_OFFSET_BITS) | *offset as u64;
+        }
+        Instr::Write { space, src, len } => {
+          let (frame, offset) = decode_space(self.regs[space.0 as usize]);
+          self.fill(frame, offset, *src, *len);
+        }
+
+        Instr::HoleNew { dst, len } => {
+          let hole = self.heap.alloc(hole_size(*len));
+          self.heap.set(hole, HOLE_EMPTY);
+          self.regs[dst.0 as usize] = hole.0;
+        }
+        Instr::HoleSet { hole, src, len } => {
+          let hole = self.addr(*hole);
+          let words = self.regs[src.0 as usize..][..*len as usize].to_vec();
+          self.hole_set(hole, *len, &words)?;
+        }
+        Instr::HoleForward { promise, space, len } => {
+          let hole = self.addr(*promise);
+          let space = self.regs[space.0 as usize];
+          match self.heap.get(hole) {
+            HOLE_EMPTY => {
+              self.heap.set(hole, HOLE_WAITING);
+              self.heap.set(hole.offset(1), space);
+            }
+            HOLE_FILLED => {
+              let words = self.heap.slice(hole.offset(1), *len).to_vec();
+              self.heap.free(hole, hole_size(*len));
+              let (frame, offset) = decode_space(space);
+              self.fill_words(frame, offset, &words);
+            }
+            _ => Err(RuntimeError::HoleMisuse)?,
+          }
+        }
+        Instr::PromiseOf { dst, src, len } => {
+          let hole = self.heap.alloc(hole_size(*len));
+          self.heap.set(hole, HOLE_FILLED);
+          let src = &self.regs[src.0 as usize..][..*len as usize];
+          self.heap.slice_mut(hole.offset(1), *len).copy_from_slice(src);
+          self.regs[dst.0 as usize] = hole.0;
+        }
+
+        Instr::Jump { target } => {
+          pc = target.0 as usize;
+          continue;
+        }
+        Instr::Branch { cond, then, else_ } => {
+          pc = if self.regs[cond.0 as usize] != 0 { then.0 } else { else_.0 } as usize;
+          continue;
+        }
+        Instr::Switch { tag, targets } => {
+          pc = targets[self.regs[tag.0 as usize] as usize].0 as usize;
+          continue;
+        }
+        Instr::End => return Ok(()),
+        Instr::Halt => self.halted = true,
+        Instr::Panic { msg } => Err(RuntimeError::Panic(msg.clone()))?,
+      }
+      pc += 1;
+    }
+  }
+
+  fn addr(&self, reg: Reg) -> Addr {
+    Addr(self.regs[reg.0 as usize])
+  }
+
+  fn hole_set(&mut self, hole: Addr, len: u32, words: &[u64]) -> Result<(), RuntimeError> {
+    match self.heap.get(hole) {
+      HOLE_EMPTY => {
+        self.heap.set(hole, HOLE_FILLED);
+        self.heap.slice_mut(hole.offset(1), len).copy_from_slice(words);
+      }
+      HOLE_WAITING => {
+        let space = self.heap.get(hole.offset(1));
+        self.heap.free(hole, hole_size(len));
+        let (frame, offset) = decode_space(space);
+        self.fill_words(frame, offset, words);
+      }
+      _ => Err(RuntimeError::HoleMisuse)?,
+    }
+    Ok(())
+  }
+
+  fn io(&mut self, op: IoOp, args: &[u64]) -> Result<Vec<u64>, RuntimeError> {
+    let err = |e: io::Error| RuntimeError::Io(e.to_string());
+    let io = args[0];
+    Ok(match op {
+      IoOp::PrintChar => {
+        let char =
+          char::try_from(args[1] as u32).map_err(|_| RuntimeError::InvalidOp("print_char"))?;
+        write!(self.host.stdout, "{char}").map_err(err)?;
+        vec![io]
+      }
+      IoOp::PrintByte => {
+        self.host.stdout.write_all(&[args[1] as u8]).map_err(err)?;
+        vec![io]
+      }
+      IoOp::Flush => {
+        self.host.stdout.flush().map_err(err)?;
+        vec![io]
+      }
+      IoOp::ReadByte => {
+        let mut buf = [0];
+        let count = self.host.stdin.read(&mut buf).map_err(err)?;
+        vec![if count == 0 { u32::MAX as u64 } else { buf[0] as u64 }, io]
+      }
+      IoOp::ReadChar => {
+        self.host.stdout.flush().map_err(err)?;
+        let char = match read_char(&mut self.host.stdin).map_err(err)? {
+          (0, None) => u32::MAX,
+          (_, None) => char::REPLACEMENT_CHARACTER as u32,
+          (_, Some(c)) => c as u32,
+        };
+        vec![char as u64, io]
+      }
+      IoOp::Ready => vec![1, io],
+    })
+  }
+
+  fn deep_copy(&mut self, loc: Loc, layout: LayoutId) -> Result<(), RuntimeError> {
+    let layouts = &self.program.layouts.layouts;
+    let mut stack = vec![(loc, layout)];
+    while let Some((loc, layout)) = stack.pop() {
+      for field in &layouts[layout].fields {
+        match field {
+          Field::Box { offset, layout } => {
+            let size = layouts[*layout].size;
+            let old = Addr(self.read(loc.offset(*offset)));
+            let new = self.heap.alloc(size);
+            let words = self.heap.slice(old, size).to_vec();
+            self.heap.slice_mut(new, size).copy_from_slice(&words);
+            self.write(loc.offset(*offset), new.0);
+            stack.push((Loc::Heap(new), *layout));
+          }
+          Field::Enum { offset, variants } => {
+            let tag = self.read(loc.offset(*offset));
+            stack.push((loc.offset(offset + 1), variants[tag as usize]));
+          }
+          Field::Inline { offset, layout } => stack.push((loc.offset(*offset), *layout)),
+          Field::Opaque { what, .. } => Err(RuntimeError::Opaque { action: "copy", what })?,
+        }
+      }
+    }
+    Ok(())
+  }
+
+  fn deep_free(&mut self, loc: Loc, layout: LayoutId) -> Result<(), RuntimeError> {
+    let layouts = &self.program.layouts.layouts;
+    let mut stack = vec![Free::Value(loc, layout)];
+    while let Some(item) = stack.pop() {
+      let (loc, layout) = match item {
+        Free::Value(loc, layout) => (loc, layout),
+        Free::Object(addr, size) => {
+          self.heap.free(addr, size);
+          continue;
+        }
+      };
+      for field in &layouts[layout].fields {
+        match field {
+          Field::Box { offset, layout } => {
+            let addr = Addr(self.read(loc.offset(*offset)));
+            stack.push(Free::Object(addr, layouts[*layout].size));
+            stack.push(Free::Value(Loc::Heap(addr), *layout));
+          }
+          Field::Enum { offset, variants } => {
+            let tag = self.read(loc.offset(*offset));
+            stack.push(Free::Value(loc.offset(offset + 1), variants[tag as usize]));
+          }
+          Field::Inline { offset, layout } => stack.push(Free::Value(loc.offset(*offset), *layout)),
+          Field::Opaque { what, .. } => Err(RuntimeError::Opaque { action: "free", what })?,
+        }
+      }
+    }
+    Ok(())
+  }
+
+  fn read(&self, loc: Loc) -> u64 {
+    match loc {
+      Loc::Reg(reg) => self.regs[reg.0 as usize],
+      Loc::Heap(addr) => self.heap.get(addr),
+    }
+  }
+
+  fn write(&mut self, loc: Loc, word: u64) {
+    match loc {
+      Loc::Reg(reg) => self.regs[reg.0 as usize] = word,
+      Loc::Heap(addr) => self.heap.set(addr, word),
+    }
+  }
+}
+
+/// The location of a word, either in a register or in the heap.
+#[derive(Debug, Clone, Copy)]
+enum Loc {
+  Reg(Reg),
+  Heap(Addr),
+}
+
+impl Loc {
+  fn offset(self, offset: u32) -> Loc {
+    match self {
+      Loc::Reg(reg) => Loc::Reg(reg.offset(offset)),
+      Loc::Heap(addr) => Loc::Heap(addr.offset(offset)),
+    }
+  }
+}
+
+enum Free {
+  Value(Loc, LayoutId),
+  Object(Addr, u32),
+}
+
+fn decode_space(space: u64) -> (Addr, u32) {
+  (Addr(space >> SPACE_OFFSET_BITS), (space & ((1 << SPACE_OFFSET_BITS) - 1)) as u32)
+}
+
+fn hole_size(len: u32) -> u32 {
+  1 + len.max(1)
+}
+
+/// Reads a single unicode character, returning the number of bytes read, and
+/// the character, if the bytes were valid UTF-8.
+fn read_char(reader: &mut impl Read) -> io::Result<(usize, Option<char>)> {
+  let mut buf = [0; 4];
+  if reader.read(&mut buf[..1])? == 0 {
+    return Ok((0, None));
+  }
+  let len = match buf[0].leading_ones() {
+    0 => return Ok((1, Some(buf[0] as char))),
+    2 => 2,
+    3 => 3,
+    4 => 4,
+    _ => return Ok((1, None)),
+  };
+  let count = reader.read(&mut buf[1..len])?;
+  if count != len - 1 {
+    return Ok((count + 1, None));
+  }
+  Ok((len, str::from_utf8(&buf[..len]).ok().and_then(|s| s.chars().next())))
+}
