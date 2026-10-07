@@ -5,7 +5,10 @@ use vine_util::{idx::IdxVec, new_idx};
 use crate::{
   components::loader::FileId,
   features::builtin::Builtins,
-  structures::ast::{Block, Expr, Ident, Impl, ImplParam, Pat, Path, Span, Trait, Ty, TypeParam},
+  structures::{
+    ast::{Block, Expr, Ident, Impl, ImplParam, Pat, Path, Span, Trait, Ty, TypeParam},
+    intrinsics::Intrinsic,
+  },
 };
 
 #[derive(Debug, Default)]
@@ -184,6 +187,7 @@ pub struct ConcreteFnDef {
   pub body: Block,
   pub frameless: bool,
   pub unsafe_: bool,
+  pub intrinsic: Option<Intrinsic>,
 }
 
 new_idx!(pub OpaqueTypeId);

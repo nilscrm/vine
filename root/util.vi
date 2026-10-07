@@ -25,10 +25,12 @@ pub fn replace[T](&a: &T, b: T) -> T {
   b
 }
 
+#[intrinsic = "black_box"]
 pub fn black_box[T](value: T) -> T {
   safe $ivy { ^ = iv:black_box(${value}) }
 }
 
+#[intrinsic = "duplicate"]
 pub unsafe fn duplicate[T](&value: &T) -> T {
   $ivy { ${value} = vi:dup(${~value} ^) }
 }
@@ -57,6 +59,7 @@ pub unsafe fn move[T](&value: &T) -> T {
   replace(&value, eraser)
 }
 
+#[intrinsic = "transmute"]
 pub unsafe fn transmute[C, T](value: C) -> T {
   $ivy { ^ = ${value} }
 }

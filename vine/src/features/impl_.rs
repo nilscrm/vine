@@ -176,6 +176,7 @@ impl Charter<'_> {
       ret_ty: fn_item.ret,
       body,
       frameless: false,
+      intrinsic: None,
       unsafe_,
     });
     self.define_value(span, def, vis, DefValueKind::Fn(FnId::Concrete(fn_id)));

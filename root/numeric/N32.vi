@@ -27,18 +27,21 @@ pub mod N32 {
   }
 
   pub impl : Add[N32, N32, N32] {
+    #[intrinsic = "n32:add"]
     fn add(a: N32, b: N32) -> N32 {
       safe $ivy { ${a} = vi:ext#2[vi:n32:add](${b} ^) }
     }
   }
 
   pub impl : Sub[N32, N32, N32] {
+    #[intrinsic = "n32:sub"]
     fn sub(a: N32, b: N32) -> N32 {
       safe $ivy { ${a} = vi:ext#2[vi:n32:sub](${b} ^) }
     }
   }
 
   pub impl : Mul[N32, N32, N32] {
+    #[intrinsic = "n32:mul"]
     fn mul(a: N32, b: N32) -> N32 {
       safe $ivy { ${a} = vi:ext#2[vi:n32:mul](${b} ^) }
     }
@@ -56,8 +59,13 @@ pub mod N32 {
         return debug::error("division by zero");
       }
 
-      safe $ivy { ${a} = vi:ext#2[vi:n32:div](${b} ^) }
+      div_unchecked(a, b)
     }
+  }
+
+  #[intrinsic = "n32:div"]
+  fn div_unchecked(a: N32, b: N32) -> N32 {
+    safe $ivy { ${a} = vi:ext#2[vi:n32:div](${b} ^) }
   }
 
   pub impl : Rem[N32, N32, N32] {
@@ -66,8 +74,13 @@ pub mod N32 {
         return debug::error("division by zero");
       }
 
-      safe $ivy { ${a} = vi:ext#2[vi:n32:rem](${b} ^) }
+      rem_unchecked(a, b)
     }
+  }
+
+  #[intrinsic = "n32:rem"]
+  fn rem_unchecked(a: N32, b: N32) -> N32 {
+    safe $ivy { ${a} = vi:ext#2[vi:n32:rem](${b} ^) }
   }
 
   pub fn .div_rem(a: N32, b: N32) -> (N32, N32) {
@@ -87,30 +100,35 @@ pub mod N32 {
   }
 
   pub impl : BitAnd[N32, N32, N32] {
+    #[intrinsic = "n32:and"]
     fn bit_and(a: N32, b: N32) -> N32 {
       safe $ivy { ${a} = vi:ext#2[vi:n32:and](${b} ^) }
     }
   }
 
   pub impl : BitOr[N32, N32, N32] {
+    #[intrinsic = "n32:or"]
     fn bit_or(a: N32, b: N32) -> N32 {
       safe $ivy { ${a} = vi:ext#2[vi:n32:or](${b} ^) }
     }
   }
 
   pub impl : BitXor[N32, N32, N32] {
+    #[intrinsic = "n32:xor"]
     fn bit_xor(a: N32, b: N32) -> N32 {
       safe $ivy { ${a} = vi:ext#2[vi:n32:xor](${b} ^) }
     }
   }
 
   pub impl : Shl[N32, N32, N32] {
+    #[intrinsic = "n32:shl"]
     fn shl(a: N32, b: N32) -> N32 {
       safe $ivy { ${a} = vi:ext#2[vi:n32:shl](${b} ^) }
     }
   }
 
   pub impl : Shr[N32, N32, N32] {
+    #[intrinsic = "n32:shr"]
     fn shr(a: N32, b: N32) -> N32 {
       safe $ivy { ${a} = vi:ext#2[vi:n32:shr](${b} ^) }
     }
@@ -118,7 +136,7 @@ pub mod N32 {
 
   pub impl : Not[N32, N32] {
     fn not(a: N32) -> N32 {
-      safe $ivy { ${a} = vi:ext#2[vi:n32:xor](${N32::maximum} ^) }
+      a ^ N32::maximum
     }
   }
 
@@ -206,19 +224,23 @@ pub mod N32 {
     Some(num)
   }
 
+  #[intrinsic = "n32:rotl"]
   pub fn .rotate_left(a: N32, b: N32) -> N32 {
     safe $ivy { ${a} = vi:ext#2[vi:n32:rotl](${b} ^) }
   }
 
+  #[intrinsic = "n32:rotr"]
   pub fn .rotate_right(a: N32, b: N32) -> N32 {
     safe $ivy { ${a} = vi:ext#2[vi:n32:rotr](${b} ^) }
   }
 
   pub impl : Ord[N32] {
+    #[intrinsic = "n32:lt"]
     fn lt(&a: &N32, &b: &N32) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:n32:lt](${b} ^) }
     }
 
+    #[intrinsic = "n32:le"]
     fn le(&a: &N32, &b: &N32) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:n32:le](${b} ^) }
     }
@@ -229,10 +251,12 @@ pub mod N32 {
   }
 
   pub impl : Eq[N32] {
+    #[intrinsic = "n32:eq"]
     fn eq(&a: &N32, &b: &N32) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:n32:eq](${b} ^) }
     }
 
+    #[intrinsic = "n32:ne"]
     fn ne(&a: &N32, &b: &N32) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:n32:ne](${b} ^) }
     }
@@ -302,10 +326,12 @@ pub mod N32 {
     r
   }
 
+  #[intrinsic = "n32:add_high"]
   pub.numeric fn add_high(a: N32, b: N32) -> Bool {
     safe $ivy { ${a} = vi:ext#2[vi:n32:add_high](${b} ^) }
   }
 
+  #[intrinsic = "n32:mul_high"]
   pub.numeric fn mul_high(a: N32, b: N32) -> N32 {
     safe $ivy { ${a} = vi:ext#2[vi:n32:mul_high](${b} ^) }
   }

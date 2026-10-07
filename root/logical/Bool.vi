@@ -14,18 +14,21 @@ pub mod Bool {
   }
 
   pub impl : BitAnd[Bool, Bool, Bool] {
+    #[intrinsic = "bool:and"]
     fn bit_and(a: Bool, b: Bool) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:bool:and](${b} ^) }
     }
   }
 
   pub impl : BitOr[Bool, Bool, Bool] {
+    #[intrinsic = "bool:or"]
     fn bit_or(a: Bool, b: Bool) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:bool:or](${b} ^) }
     }
   }
 
   pub impl : BitXor[Bool, Bool, Bool] {
+    #[intrinsic = "bool:xor"]
     fn bit_xor(a: Bool, b: Bool) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:bool:xor](${b} ^) }
     }
@@ -33,26 +36,31 @@ pub mod Bool {
 
   #[builtin = "bool_not"]
   pub impl : Not[Bool, Bool] {
+    #[intrinsic = "bool:not"]
     fn not(a: Bool) -> Bool {
       safe $ivy { ${a} = vi:ext#1[vi:bool:not](^) }
     }
   }
 
   pub impl : Eq[Bool] {
+    #[intrinsic = "bool:eq"]
     fn eq(&a: &Bool, &b: &Bool) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:bool:eq](${b} ^) }
     }
 
+    #[intrinsic = "bool:xor"]
     fn ne(&a: &Bool, &b: &Bool) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:bool:xor](${b} ^) }
     }
   }
 
   pub impl : Ord[Bool] {
+    #[intrinsic = "bool:lt"]
     fn lt(&a: &Bool, &b: &Bool) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:bool:lt](${b} ^) }
     }
 
+    #[intrinsic = "bool:le"]
     fn le(&a: &Bool, &b: &Bool) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:bool:le](${b} ^) }
     }
@@ -79,6 +87,7 @@ pub mod Bool {
   }
 
   pub impl to_n32: Cast[Bool, N32] {
+    #[intrinsic = "bool:to_n32"]
     fn cast(self: Bool) -> N32 {
       safe $ivy { ${self} = vi:ext#1[vi:bool:to_n32](^) }
     }

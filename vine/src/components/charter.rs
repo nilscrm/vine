@@ -7,6 +7,7 @@ use crate::{
     ast::{Attr, AttrKind, Ident, Item, ItemKind, ModKind, Span, Vis, visit::VisitMut},
     chart::Chart,
     diag::{Diag, Diags, ErrorGuaranteed},
+    intrinsics::Intrinsic,
   },
 };
 
@@ -224,6 +225,22 @@ impl Charter<'_> {
             continue;
           };
           self.chart.concrete_fns[concrete_fn_id].frameless = true;
+        }
+        AttrKind::Intrinsic(name) => {
+          let Some(concrete_fn_id) = concrete_fn_id else {
+            self.diags.error(Diag::BadIntrinsicAttr { span });
+            continue;
+          };
+          let Some(intrinsic) = Intrinsic::from_name(&name) else {
+            self.diags.error(Diag::UnknownIntrinsic { span, name });
+            continue;
+          };
+          let fn_def = &mut self.chart.concrete_fns[concrete_fn_id];
+          if fn_def.intrinsic.is_some() {
+            self.diags.error(Diag::DuplicateIntrinsicAttr { span });
+            continue;
+          }
+          fn_def.intrinsic = Some(intrinsic);
         }
         AttrKind::Test => {
           let Some(concrete_fn_id) = concrete_fn_id else {

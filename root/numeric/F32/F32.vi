@@ -23,18 +23,21 @@ pub mod F32 {
   }
 
   pub impl : Add[F32, F32, F32] {
+    #[intrinsic = "f32:add"]
     fn add(a: F32, b: F32) -> F32 {
       safe $ivy { ${a} = vi:ext#2[vi:f32:add](${b} ^) }
     }
   }
 
   pub impl : Sub[F32, F32, F32] {
+    #[intrinsic = "f32:sub"]
     fn sub(a: F32, b: F32) -> F32 {
       safe $ivy { ${a} = vi:ext#2[vi:f32:sub](${b} ^) }
     }
   }
 
   pub impl : Mul[F32, F32, F32] {
+    #[intrinsic = "f32:mul"]
     fn mul(a: F32, b: F32) -> F32 {
       safe $ivy { ${a} = vi:ext#2[vi:f32:mul](${b} ^) }
     }
@@ -62,17 +65,20 @@ pub mod F32 {
   }
 
   pub impl : Div[F32, F32, F32] {
+    #[intrinsic = "f32:div"]
     fn div(a: F32, b: F32) -> F32 {
       safe $ivy { ${a} = vi:ext#2[vi:f32:div](${b} ^) }
     }
   }
 
   pub impl : Rem[F32, F32, F32] {
+    #[intrinsic = "f32:rem"]
     fn rem(a: F32, b: F32) -> F32 {
       safe $ivy { ${a} = vi:ext#2[vi:f32:rem](${b} ^) }
     }
   }
 
+  #[intrinsic = "f32:sqrt"]
   pub fn .sqrt(a: F32) -> F32 {
     safe $ivy { ${a} = vi:ext#1[vi:f32:sqrt](^) }
   }
@@ -90,55 +96,65 @@ pub mod F32 {
   }
 
   pub impl : Eq[F32] {
+    #[intrinsic = "f32:eq"]
     fn eq(&a: &F32, &b: &F32) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:f32:eq](${b} ^) }
     }
 
+    #[intrinsic = "f32:ne"]
     fn ne(&a: &F32, &b: &F32) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:f32:ne](${b} ^) }
     }
   }
 
   pub impl : Lt[F32] {
+    #[intrinsic = "f32:lt"]
     fn lt(&a: &F32, &b: &F32) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:f32:lt](${b} ^) }
     }
   }
 
   pub impl : Le[F32] {
+    #[intrinsic = "f32:le"]
     fn le(&a: &F32, &b: &F32) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:f32:le](${b} ^) }
     }
   }
 
   pub impl from_n32: Cast[N32, F32] {
+    #[intrinsic = "n32:to_f32"]
     fn cast(n: N32) -> F32 {
       safe $ivy { ${n} = vi:ext#1[vi:n32:to_f32](^) }
     }
   }
 
   pub impl to_n32: Cast[F32, N32] {
+    #[intrinsic = "f32:to_n32"]
     fn cast(n: F32) -> N32 {
       safe $ivy { ${n} = vi:ext#1[vi:f32:to_n32](^) }
     }
   }
 
   pub impl from_i32: Cast[I32, F32] {
+    #[intrinsic = "i32:to_f32"]
     fn cast(i: I32) -> F32 {
       safe $ivy { ${i} = vi:ext#1[vi:i32:to_f32](^) }
     }
   }
 
   pub impl to_i32: Cast[F32, I32] {
+    #[intrinsic = "f32:to_i32"]
     fn cast(f: F32) -> I32 {
       safe $ivy { ${f} = vi:ext#1[vi:f32:to_i32](^) }
     }
   }
 
+  #[intrinsic = "f32:to_bits"]
   pub fn .to_bits(f: F32) -> N32 {
     safe $ivy { ${f} = vi:ext#1[vi:f32:to_bits](^) }
   }
 
+  #[intrinsic = "f32:from_bits"]
   pub fn from_bits(n: N32) -> F32 {
     safe $ivy { ${n} = vi:ext#1[vi:f32:from_bits](^) }
   }

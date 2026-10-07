@@ -19,30 +19,35 @@ pub mod F64 {
   }
 
   pub impl fork: Fork[F64] {
+    #[intrinsic = "f64:fork"]
     fn fork(&f: &F64) -> F64 {
       safe $ivy { ${f} = vi:ext#1[vi:f64:fork](${~f} ^) }
     }
   }
 
   pub impl drop: Drop[F64] {
+    #[intrinsic = "f64:drop"]
     fn drop(f: F64) {
       safe $ivy { ${f} = vi:ext#1[vi:f64:drop] }
     }
   }
 
   pub impl add: Add[F64, F64, F64] {
+    #[intrinsic = "f64:add"]
     fn add(a: F64, b: F64) -> F64 {
       safe $ivy { ${a} = vi:ext#2[vi:f64:add](${b} ^) }
     }
   }
 
   pub impl sub: Sub[F64, F64, F64] {
+    #[intrinsic = "f64:sub"]
     fn sub(a: F64, b: F64) -> F64 {
       safe $ivy { ${a} = vi:ext#2[vi:f64:sub](${b} ^) }
     }
   }
 
   pub impl mul: Mul[F64, F64, F64] {
+    #[intrinsic = "f64:mul"]
     fn mul(a: F64, b: F64) -> F64 {
       safe $ivy { ${a} = vi:ext#2[vi:f64:mul](${b} ^) }
     }
@@ -65,17 +70,20 @@ pub mod F64 {
   }
 
   pub impl div: Div[F64, F64, F64] {
+    #[intrinsic = "f64:div"]
     fn div(a: F64, b: F64) -> F64 {
       safe $ivy { ${a} = vi:ext#2[vi:f64:div](${b} ^) }
     }
   }
 
   pub impl rem: Rem[F64, F64, F64] {
+    #[intrinsic = "f64:rem"]
     fn rem(a: F64, b: F64) -> F64 {
       safe $ivy { ${a} = vi:ext#2[vi:f64:rem](${b} ^) }
     }
   }
 
+  #[intrinsic = "f64:sqrt"]
   pub fn .sqrt(a: F64) -> F64 {
     safe $ivy { ${a} = vi:ext#1[vi:f64:sqrt](^) }
   }
@@ -93,64 +101,75 @@ pub mod F64 {
   }
 
   pub impl eq: Eq[F64] {
+    #[intrinsic = "f64:eq"]
     fn eq(&a: &F64, &b: &F64) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:f64:eq](${b} ^) }
     }
 
+    #[intrinsic = "f64:ne"]
     fn ne(&a: &F64, &b: &F64) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:f64:ne](${b} ^) }
     }
   }
 
   pub impl lt: Lt[F64] {
+    #[intrinsic = "f64:lt"]
     fn lt(&a: &F64, &b: &F64) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:f64:lt](${b} ^) }
     }
   }
 
   pub impl le: Le[F64] {
+    #[intrinsic = "f64:le"]
     fn le(&a: &F64, &b: &F64) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:f64:le](${b} ^) }
     }
   }
 
   pub impl from_n32: Cast[N32, F64] {
+    #[intrinsic = "n32:to_f64"]
     fn cast(n: N32) -> F64 {
       safe $ivy { ${n} = vi:ext#1[vi:n32:to_f64](^) }
     }
   }
 
   pub impl to_n32: Cast[F64, N32] {
+    #[intrinsic = "f64:to_n32"]
     fn cast(f: F64) -> N32 {
       safe $ivy { ${f} = vi:ext#1[vi:f64:to_n32](^) }
     }
   }
 
   pub impl from_i32: Cast[I32, F64] {
+    #[intrinsic = "i32:to_f64"]
     fn cast(i: I32) -> F64 {
       safe $ivy { ${i} = vi:ext#1[vi:i32:to_f64](^) }
     }
   }
 
   pub impl to_i32: Cast[F64, I32] {
+    #[intrinsic = "f64:to_i32"]
     fn cast(f: F64) -> I32 {
       safe $ivy { ${f} = vi:ext#1[vi:f64:to_i32](^) }
     }
   }
 
   pub impl from_f32: Cast[F32, F64] {
+    #[intrinsic = "f32:to_f64"]
     fn cast(f: F32) -> F64 {
       safe $ivy { ${f} = vi:ext#1[vi:f32:to_f64](^) }
     }
   }
 
   pub impl to_f32: Cast[F64, F32] {
+    #[intrinsic = "f64:to_f32"]
     fn cast(f: F64) -> F32 {
       safe $ivy { ${f} = vi:ext#1[vi:f64:to_f32](^) }
     }
   }
 
   pub impl from_n64: Cast[N64, F64] {
+    #[intrinsic = "n64:to_f64"]
     fn cast(N64(lo, hi): N64) -> F64 {
       safe $ivy { ${lo} = vi:ext#2[vi:n64:to_f64](${hi} ^) }
     }
@@ -158,14 +177,25 @@ pub mod F64 {
 
   pub impl to_n64: Cast[F64, N64] {
     fn cast(f: F64) -> N64 {
-      N64(safe $ivy { ${f} = vi:ext#1[vi:f64:to_n64](^0 ^1) })
+      N64(to_n64_parts(f))
     }
   }
 
-  pub fn .to_bits(f: F64) -> N64 {
-    N64(safe $ivy { ${f} = vi:ext#1[vi:f64:to_bits](^0 ^1) })
+  #[intrinsic = "f64:to_n64"]
+  fn to_n64_parts(f: F64) -> (N32, N32) {
+    safe $ivy { ${f} = vi:ext#1[vi:f64:to_n64](^0 ^1) }
   }
 
+  pub fn .to_bits(f: F64) -> N64 {
+    N64(to_bits_parts(f))
+  }
+
+  #[intrinsic = "f64:to_bits"]
+  fn to_bits_parts(f: F64) -> (N32, N32) {
+    safe $ivy { ${f} = vi:ext#1[vi:f64:to_bits](^0 ^1) }
+  }
+
+  #[intrinsic = "f64:from_bits"]
   pub fn from_bits(N64(lo, hi): N64) -> F64 {
     safe $ivy { ${lo} = vi:ext#2[vi:f64:from_bits](${hi} ^) }
   }

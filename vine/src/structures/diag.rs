@@ -315,6 +315,12 @@ diags! {
     ["expected `{name}` to be a {kind} configuration value"]
   BadFramelessAttr
     ["the `#[frameless]` attribute can only be applied to a function"]
+  BadIntrinsicAttr
+    ["the `#[intrinsic]` attribute can only be applied to a function"]
+  UnknownIntrinsic { name: String }
+    ["unknown intrinsic `{name}`"]
+  DuplicateIntrinsicAttr
+    ["duplicate `#[intrinsic]` attribute"]
   UnusedVariable
     ["unused variable"]
   UnusedItem

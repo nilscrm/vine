@@ -18,20 +18,24 @@ pub mod Char {
   pub impl to_n32: Cast[Char, N32] = safe transmute;
 
   pub impl : Eq[Char] {
+    #[intrinsic = "n32:eq"]
     fn eq(&a: &Char, &b: &Char) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:n32:eq](${b} ^) }
     }
 
+    #[intrinsic = "n32:ne"]
     fn ne(&a: &Char, &b: &Char) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:n32:ne](${b} ^) }
     }
   }
 
   pub impl : Ord[Char] {
+    #[intrinsic = "n32:lt"]
     fn lt(&a: &Char, &b: &Char) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:n32:lt](${b} ^) }
     }
 
+    #[intrinsic = "n32:le"]
     fn le(&a: &Char, &b: &Char) -> Bool {
       safe $ivy { ${a} = vi:ext#2[vi:n32:le](${b} ^) }
     }
@@ -120,18 +124,21 @@ pub mod Char {
   }
 
   pub impl add_n32: Add[Char, N32, Char] {
+    #[intrinsic = "n32:add"]
     fn add(a: Char, b: N32) -> Char {
       safe $ivy { ${a} = vi:ext#2[vi:n32:add](${b} ^) }
     }
   }
 
   pub impl sub_n32: Sub[Char, N32, Char] {
+    #[intrinsic = "n32:sub"]
     fn sub(a: Char, b: N32) -> Char {
       safe $ivy { ${a} = vi:ext#2[vi:n32:sub](${b} ^) }
     }
   }
 
   pub impl sub_char: Sub[Char, Char, N32] {
+    #[intrinsic = "n32:sub"]
     fn sub(a: Char, b: Char) -> N32 {
       safe $ivy { ${a} = vi:ext#2[vi:n32:sub](${b} ^) }
     }

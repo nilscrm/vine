@@ -136,6 +136,10 @@ impl<'src> Parser<'src> {
         "test" => AttrKind::Test,
         "self_dual" => AttrKind::SelfDual,
         "configurable" => AttrKind::Configurable,
+        "intrinsic" => {
+          self.expect(Token::Eq)?;
+          AttrKind::Intrinsic(self.parse_string()?)
+        }
         _ => Err(Diag::UnknownAttribute { span: ident_span })?,
       }
     };

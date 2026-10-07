@@ -4,6 +4,7 @@ pub mod chart;
 pub mod checkpoint;
 pub mod content;
 pub mod diag;
+pub mod intrinsics;
 pub mod resolutions;
 pub mod signatures;
 pub mod specializations;

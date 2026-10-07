@@ -26,6 +26,7 @@ pub mod IO {
   }
 
   /// Prints the given character to stdout.
+  #[intrinsic = "io:print_char"]
   pub fn .print_char(&io: &IO, char: Char) {
     safe $ivy { ${io} = vi:ext#2[root:io:print_char](${char} ${~io}) }
   }
@@ -36,11 +37,13 @@ pub mod IO {
     }
   }
 
+  #[intrinsic = "io:print_byte"]
   pub fn .print_byte(&io: &IO, byte: N32) {
     safe $ivy { ${io} = vi:ext#2[root:io:print_byte](${byte} ${~io}) }
   }
 
   /// Flushes any buffered output to stdout.
+  #[intrinsic = "io:flush"]
   pub fn .flush(&io: &IO) {
     safe $ivy { ${io} = vi:ext#1[root:io:flush](${~io}) }
   }
@@ -94,6 +97,7 @@ pub mod IO {
 
   /// Reads a UTF-8 code point from stdin, returning `eof` if nothing was
   /// read. If an invalid UTF-8 char is encountered, `U+FFFD` is returned.
+  #[intrinsic = "io:read_char"]
   fn ._read_char(&io: &IO) -> Char {
     safe $ivy { ${io} = vi:ext#1[root:io:read_char](^ ${~io}) }
   }
@@ -106,6 +110,7 @@ pub mod IO {
   }
 
   /// Reads a byte from stdin, returning `eof` if nothing was read.
+  #[intrinsic = "io:read_byte"]
   fn ._read_byte(&io: &IO) -> Char {
     safe $ivy { ${io} = vi:ext#1[root:io:read_byte](^ ${~io}) }
   }
@@ -117,6 +122,7 @@ pub mod IO {
   ///   io.println("hi!");
   /// }
   /// ```
+  #[intrinsic = "io:ready"]
   pub fn .forever(&io: &IO) -> Bool {
     safe $ivy { ${io} = vi:ext#1[vi:io:ready](^ ${~io}) }
   }
