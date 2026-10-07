@@ -1,5 +1,5 @@
 
-use #root::{data::Array, util::eraser};
+use #root::data::Array;
 
 pub fn main(&io: &IO) {
   let lines = io.full_input().split_trim("\n");
@@ -185,3 +185,7 @@ fn cost_func(c: CostFunc, size: N32, dead_row: N32) -> CostFunc {
   }
   o
 }
+
+// TODO(frames): this relies on erasure, which the frames runtime does not
+// support; rewrite it without erasure.
+unsafe const eraser[T]: T = $ivy { ^ = vi:eraser };

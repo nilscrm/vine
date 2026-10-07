@@ -3,7 +3,7 @@
 mod;
 
 use ops::{Cast, Fn};
-use util::{duplicate, erase, eraser};
+use util::{duplicate, erase, unreachable};
 
 pub mod Show;
 
@@ -26,7 +26,11 @@ pub fn backtrace() -> Option[&Stack] {
   }
 }
 
-const error_node[T]: T = safe $ivy { ^ = vi:error };
+/// Aborts the program with an error.
+#[intrinsic = "panic"]
+fn panic[T]() -> T {
+  safe $ivy { ^ = vi:error }
+}
 
 #[frameless]
 pub fn error[M, T; Cast[M, String]](msg: M) -> T {
@@ -37,12 +41,12 @@ pub fn error[M, T; Cast[M, String]](msg: M) -> T {
       state.io.print("  @ {frame}\n");
     }
   }
-  error_node
+  panic()
 }
 
 #[frameless]
 pub fn error_with[M, T, U; Cast[M, String]](msg: M, ctx: T) -> U {
-  ~error_node = ctx;
+  safe erase(ctx);
   debug::error(msg)
 }
 
@@ -94,7 +98,7 @@ struct DebugState({ io: IO, stack: Stack });
 
 #[builtin = "debug_state"]
 fn debug_state() -> Option[&DebugState] {
-  safe eraser
+  safe unreachable()
 }
 
 pub struct Stack(Lazy[Option[Frame]], Stack);

@@ -7,7 +7,7 @@ pub mod flex;
 pub mod Index;
 pub mod Range;
 
-use util::eraser;
+use util::unreachable;
 
 pub trait[A, B] Concat[O] {
   #[builtin = "concat"]
@@ -37,7 +37,7 @@ pub mod Cast {
 
   pub impl never[T]: Cast[!, T] {
     fn cast(_: !) -> T {
-      safe eraser
+      safe unreachable()
     }
   }
 }

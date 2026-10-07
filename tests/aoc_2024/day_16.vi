@@ -1,5 +1,5 @@
 
-use #root::{data::{Array, Map}, ops::elementwise as _, util::eraser};
+use #root::{data::{Array, Map}, ops::elementwise as _};
 
 pub fn main(&io: &IO) {
   let grid = [];
@@ -103,3 +103,7 @@ fn delta(dir: N32) -> (N32, N32) {
     (0, x)
   }
 }
+
+// TODO(frames): this relies on erasure, which the frames runtime does not
+// support; rewrite it without erasure.
+unsafe const eraser[T]: T = $ivy { ^ = vi:eraser };

@@ -2,7 +2,7 @@
 // @run -d
 // @input lambda
 
-use #root::{data::Map, util::{duplicate, erase, eraser}};
+use #root::{data::Map, util::{duplicate, erase}};
 
 pub fn main(&io: &IO) {
   while io.prompt("> ") is Some(line) {
@@ -177,3 +177,7 @@ fn new_var(n: N32) -> String {
   }
   String(chars)
 }
+
+// TODO(frames): this relies on erasing spaces, which the frames runtime does
+// not support; rewrite it without erasure.
+unsafe const eraser[T]: T = $ivy { ^ = vi:eraser };

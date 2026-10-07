@@ -1,5 +1,5 @@
 
-use #root::{data::Iterator::Fused, util::{erase, eraser}};
+use #root::{data::Iterator::Fused, util::erase};
 
 pub fn main(&io: &IO) {
   let lines = [];
@@ -158,3 +158,7 @@ fn new_channel[M]() -> (Channel[M], Channel[M]) {
 fn neglect_channel[M](d: M) -> Channel[M] {
   Channel(d, safe eraser)
 }
+
+// TODO(frames): this relies on erasing spaces, which the frames runtime does
+// not support; rewrite it without erasure.
+unsafe const eraser[T]: T = $ivy { ^ = vi:eraser };

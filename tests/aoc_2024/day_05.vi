@@ -1,5 +1,5 @@
 
-use #root::{data::Array, ops::elementwise as _, util::move};
+use #root::{data::Array, ops::elementwise as _};
 
 pub fn main(&io: &IO) {
   let masks = Array::new(100, ((0, 0), (0, 0)));
@@ -90,4 +90,12 @@ fn set_bit(&mask: &Mask, n: N32, bit: Bool) {
 
 fn is_empty(((a, b), (c, d)): Mask) -> Bool {
   (a | b | c | d) == 0
+}
+
+// TODO(frames): this relies on erasure, which the frames runtime does not
+// support; rewrite it without erasure.
+unsafe const eraser[T]: T = $ivy { ^ = vi:eraser };
+
+unsafe fn move[T](&value: &T) -> T {
+  replace(&value, eraser)
 }

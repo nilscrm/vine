@@ -1,5 +1,5 @@
 
-use #root::util::{erase, eraser};
+use #root::util::{erase, transmute};
 
 pub type A;
 
@@ -7,7 +7,7 @@ pub mod A {
   pub impl : Drop[A] = safe erase;
 
   pub fn new() -> A {
-    safe eraser
+    safe transmute(())
   }
 }
 

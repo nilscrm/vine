@@ -1,7 +1,7 @@
 
 use data::Iterator::{Iterator, Collect, Iterate};
 use ops::{Cast, Concat, Index::{Index, IndexPlace, IndexSpace, IndexValue}, comparison::Ord};
-use util::{eraser, transmute};
+use util::transmute;
 
 pub struct* Map[K, V](Set[(K, V)]);
 
@@ -51,15 +51,15 @@ pub mod Map[K, V; Ord[K]] {
   }
 
   pub fn .has[...](&self: &Map[K, V], &key: &K) -> Bool {
-    self!.has(&(key, *safe eraser))
+    self!.has_by(fn* (&(k, _): &(K, V)) { key.cmp(&k) })
   }
 
   pub fn .at[...](&self: &Map[K, V], &key: &K) -> Option[&V] {
-    Option::map(self!.at_eq(&(key, *safe eraser)), fn? (&(_, v)) { &v })
+    Option::map(self!.at_eq_by(fn* (&(k, _): &(K, V)) { key.cmp(&k) }), fn? (&(_, v)) { &v })
   }
 
   pub fn .get[... V+](&self: &Map[K, V], &key: &K) -> Option[V] {
-    Option::map(self!.at_eq(&(key, *safe eraser)), fn? (&(_, v)) { v })
+    Option::map(self!.at_eq_by(fn* (&(k, _): &(K, V)) { key.cmp(&k) }), fn? (&(_, v)) { v })
   }
 
   pub fn .at_or_insert[... K?, V?](&self: &Map[K, V], key: K, value: V) -> &V {
@@ -76,23 +76,23 @@ pub mod Map[K, V; Ord[K]] {
   }
 
   pub fn .at_le[...](&self: &Map[K, V], &key: &K) -> Option[&(K, V)] {
-    self!.at_le(&(key, *safe eraser))
+    self!.at_le_by(fn* (&(k, _): &(K, V)) { key.cmp(&k) })
   }
 
   pub fn .get_le[... K+, V+](&self: &Map[K, V], &key: &K) -> Option[(K, V)] {
-    self!.get_le(&(key, *safe eraser))
+    self!.at_le_by(fn* (&(k, _): &(K, V)) { key.cmp(&k) }).as_fork()
   }
 
   pub fn .at_ge[...](&self: &Map[K, V], &key: &K) -> Option[&(K, V)] {
-    self!.at_ge(&(key, *safe eraser))
+    self!.at_ge_by(fn* (&(k, _): &(K, V)) { key.cmp(&k) })
   }
 
   pub fn .get_ge[... K+, V+](&self: &Map[K, V], &key: &K) -> Option[(K, V)] {
-    self!.get_ge(&(key, *safe eraser))
+    self!.at_ge_by(fn* (&(k, _): &(K, V)) { key.cmp(&k) }).as_fork()
   }
 
   pub fn .remove[... K?](&self: &Map[K, V], &key: &K) -> Option[V] {
-    Option::map(self!.remove(&(key, *safe eraser)), fn? ((_, v)) { v })
+    Option::map(self!.remove_by(fn* (&(k, _): &(K, V)) { key.cmp(&k) }), fn? ((_, v)) { v })
   }
 
   pub fn .remove_min[...](&self: &Map[K, V]) -> Option[(K, V)] {

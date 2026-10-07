@@ -1,5 +1,5 @@
 
-use #root::{data::Map, util::{erase, eraser, move}};
+use #root::{data::Map, util::erase};
 
 pub fn main(&io: &IO) {
   let map = Map::empty[String];
@@ -67,4 +67,12 @@ mod Wire {
   pub fn .set(&Wire(~out, _), value: Bool) {
     out = value;
   }
+}
+
+// TODO(frames): this relies on erasure, which the frames runtime does not
+// support; rewrite it without erasure.
+unsafe const eraser[T]: T = $ivy { ^ = vi:eraser };
+
+unsafe fn move[T](&value: &T) -> T {
+  replace(&value, eraser)
 }

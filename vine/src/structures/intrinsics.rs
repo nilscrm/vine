@@ -32,6 +32,9 @@ intrinsics! {
   Duplicate = "duplicate",
   Transmute = "transmute",
   BlackBox = "black_box",
+  Erase = "erase",
+  Unreachable = "unreachable",
+  Panic = "panic",
 
   N32Add = "n32:add",
   N32Sub = "n32:sub",

@@ -76,28 +76,40 @@ pub mod Set[T; Ord[T]] {
     }
   }
 
-  pub fn .has[...](&Set[T](len, node), &key: &T) -> Bool {
+  pub fn .has[...](&self: &Set[T], &key: &T) -> Bool {
+    self.has_by(fn* (&value: &T) { key.cmp(&value) })
+  }
+
+  /// Like `.has`, but locates the value with `cmp`, which compares the sought
+  /// value to the given value.
+  pub fn .has_by[T, F*; fn F(&T) -> Ord](&Set[T](len, node), cmp: F) -> Bool {
     if len == 0 {
       false
     } else {
       let &(left, value, right) = safe &node.data;
-      match key.cmp(&value) {
-        Ord::Lt() { left.has(&key) }
+      match cmp(&value) {
+        Ord::Lt() { left.has_by(cmp) }
         Ord::Eq() { true }
-        Ord::Gt() { right.has(&key) }
+        Ord::Gt() { right.has_by(cmp) }
       }
     }
   }
 
-  pub fn .at_eq[...](&Set[T](len, node), &key: &T) -> Option[&T] {
+  pub fn .at_eq[...](&self: &Set[T], &key: &T) -> Option[&T] {
+    self.at_eq_by(fn* (&value: &T) { key.cmp(&value) })
+  }
+
+  /// Like `.at_eq`, but locates the value with `cmp`, which compares the
+  /// sought value to the given value.
+  pub fn .at_eq_by[T, F*; fn F(&T) -> Ord](&Set[T](len, node), cmp: F) -> Option[&T] {
     if len == 0 {
       None()
     } else {
       let &(left, value, right) = safe &node.data;
-      match key.cmp(&value) {
-        Ord::Lt() { left.at_eq(&key) }
+      match cmp(&value) {
+        Ord::Lt() { left.at_eq_by(cmp) }
         Ord::Eq() { Some(&value) }
-        Ord::Gt() { right.at_eq(&key) }
+        Ord::Gt() { right.at_eq_by(cmp) }
       }
     }
   }
@@ -106,16 +118,22 @@ pub mod Set[T; Ord[T]] {
     self.at_eq(key).as_fork()
   }
 
-  pub fn .at_le[...](&Set[T](len, node), &key: &T) -> Option[&T] {
+  pub fn .at_le[...](&self: &Set[T], &key: &T) -> Option[&T] {
+    self.at_le_by(fn* (&value: &T) { key.cmp(&value) })
+  }
+
+  /// Like `.at_le`, but locates the value with `cmp`, which compares the
+  /// sought value to the given value.
+  pub fn .at_le_by[T, F*; fn F(&T) -> Ord](&Set[T](len, node), cmp: F) -> Option[&T] {
     if len == 0 {
       None()
     } else {
       let &(left, value, right) = safe &node.data;
-      match key.cmp(&value) {
-        Ord::Lt() { left.at_le(&key) }
+      match cmp(&value) {
+        Ord::Lt() { left.at_le_by(cmp) }
         Ord::Eq() { Some(&value) }
         Ord::Gt() {
-          if right.at_le(&key) is Some(value) {
+          if right.at_le_by(cmp) is Some(value) {
             Some(value)
           } else {
             Some(&value)
@@ -129,21 +147,27 @@ pub mod Set[T; Ord[T]] {
     self.at_le(&key).as_fork()
   }
 
-  pub fn .at_ge[...](&Set[T](len, node), &key: &T) -> Option[&T] {
+  pub fn .at_ge[...](&self: &Set[T], &key: &T) -> Option[&T] {
+    self.at_ge_by(fn* (&value: &T) { key.cmp(&value) })
+  }
+
+  /// Like `.at_ge`, but locates the value with `cmp`, which compares the
+  /// sought value to the given value.
+  pub fn .at_ge_by[T, F*; fn F(&T) -> Ord](&Set[T](len, node), cmp: F) -> Option[&T] {
     if len == 0 {
       None()
     } else {
       let &(left, value, right) = safe &node.data;
-      match key.cmp(&value) {
+      match cmp(&value) {
         Ord::Lt() {
-          if left.at_ge(&key) is Some(value) {
+          if left.at_ge_by(cmp) is Some(value) {
             Some(value)
           } else {
             Some(&value)
           }
         }
         Ord::Eq() { Some(&value) }
-        Ord::Gt() { right.at_ge(&key) }
+        Ord::Gt() { right.at_ge_by(cmp) }
       }
     }
   }
@@ -152,15 +176,21 @@ pub mod Set[T; Ord[T]] {
     self.at_ge(&key).as_fork()
   }
 
-  pub fn .remove[... T](&Set[T](len, node), &key: &T) -> Option[T] {
+  pub fn .remove[... T](&self: &Set[T], &key: &T) -> Option[T] {
+    self.remove_by(fn* (&value: &T) { key.cmp(&value) })
+  }
+
+  /// Like `.remove`, but locates the value with `cmp`, which compares the
+  /// sought value to the given value.
+  pub fn .remove_by[... F*; fn F(&T) -> Ord](&Set[T](len, node), cmp: F) -> Option[T] {
     if len == 0 {
       None()
     } else {
       let (left, value, right) = safe node.data;
       let old;
-      match key.cmp(&value) {
+      match cmp(&value) {
         Ord::Lt() {
-          old = left.remove(&key);
+          old = left.remove_by(cmp);
           safe node.data = (left, value, right);
           len = Set::size(safe &node.data);
           balance_left(safe &node.data);
@@ -171,7 +201,7 @@ pub mod Set[T; Ord[T]] {
           node = merge_balanced(left, right);
         }
         Ord::Gt() {
-          old = right.remove(&key);
+          old = right.remove_by(cmp);
           safe node.data = (left, value, right);
           len = Set::size(safe &node.data);
           balance_right(safe &node.data);

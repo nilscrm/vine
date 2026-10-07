@@ -42,10 +42,10 @@ pub unsafe impl duplicate[T]: Fork[T] {
   }
 }
 
-pub unsafe const eraser[T]: T = $ivy { ^ = vi:eraser };
-
+/// Frees `value`, without running any `Drop` implementations.
+#[intrinsic = "erase"]
 pub unsafe fn erase[T](value: T) {
-  ~eraser = value;
+  $ivy { ${value} = vi:eraser }
 }
 
 #[builtin = "erase"]
@@ -55,8 +55,10 @@ pub unsafe impl erase[T]: Drop[T] {
   }
 }
 
-pub unsafe fn move[T](&value: &T) -> T {
-  replace(&value, eraser)
+/// Marks code that can never be reached; reaching it is undefined behavior.
+#[intrinsic = "unreachable"]
+pub unsafe fn unreachable[T]() -> T {
+  $ivy { ^ = vi:eraser }
 }
 
 #[intrinsic = "transmute"]
