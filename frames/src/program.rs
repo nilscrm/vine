@@ -256,3 +256,20 @@ impl IoOp {
     }
   }
 }
+
+impl fmt::Display for Program {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    for (id, unit) in self.units.iter() {
+      writeln!(f, "{id:?} {} (regs: {})", unit.name, unit.regs)?;
+      for (block_id, block) in self.blocks.iter() {
+        if block.unit == id {
+          writeln!(f, "  {block_id:?} @ {:?} <- {:?}", block.entry, block.frame)?;
+        }
+      }
+      for (i, instr) in unit.code.iter().enumerate() {
+        writeln!(f, "  {i:>4}: {instr:?}")?;
+      }
+    }
+    Ok(())
+  }
+}

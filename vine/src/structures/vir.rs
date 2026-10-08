@@ -373,3 +373,80 @@ impl VirLocal {
     }
   }
 }
+
+/// A compact rendering of VIR, for debugging (see `DUMP_VIR`).
+pub fn dump(vir: &Vir) -> String {
+  use std::fmt::Write;
+  fn port(p: &Port) -> String {
+    match &p.kind {
+      PortKind::Wire(_, w) => {
+        format!("{w:?}")
+      }
+      PortKind::Nil => "()".into(),
+      PortKind::N32(n) => format!("{n}"),
+      PortKind::Bool(b) => format!("{b}"),
+      k => format!("{k:?}"),
+    }
+  }
+  fn ports(ps: &[Port]) -> String {
+    ps.iter().map(port).collect::<Vec<_>>().join(", ")
+  }
+  let mut s = String::new();
+  for (id, l) in vir.locals.iter() {
+    writeln!(s, "local {id:?}: inv={} fork={:?} drop={:?}", l.inv.0, l.fork, l.drop).unwrap();
+  }
+  for (id, i) in vir.interfaces.iter() {
+    writeln!(
+      s,
+      "interface {id:?} layer={:?} incoming={} inline={} kind={:?} wires={:?}",
+      i.layer,
+      i.incoming,
+      i.inline(),
+      i.kind,
+      i.wires
+    )
+    .unwrap();
+  }
+  for (id, st) in vir.stages.iter() {
+    let header = match &st.header {
+      Header::Bare => "bare".into(),
+      Header::Fn(ps, r) => format!("fn({}) -> {}", ports(ps), port(r)),
+      Header::Const(r) => format!("const {}", port(r)),
+      Header::Match(e, v, p) => format!("match {e:?}::{v:?}({})", port(p)),
+      h => format!("{h:?}"),
+    };
+    writeln!(
+      s,
+      "stage {id:?} (interface {:?}, layer {:?}) {header} decls={:?}",
+      st.interface, st.layer, st.declarations
+    )
+    .unwrap();
+    for step in &st.steps {
+      let t = match step {
+        Step::Invoke(_, l, inv) => format!(
+          "{l:?}.{}",
+          match inv {
+            Invocation::Barrier => "barrier".into(),
+            Invocation::Read(p) => format!("read -> {}", port(p)),
+            Invocation::Write(p) => format!("write {}", port(p)),
+            Invocation::ReadBarrier(p) => format!("read_barrier -> {}", port(p)),
+            Invocation::BarrierWrite(p) => format!("barrier_write {}", port(p)),
+            Invocation::ReadWrite(a, b) => format!("read_write -> {}, {}", port(a), port(b)),
+          }
+        ),
+        Step::Transfer(t) => format!(
+          "transfer {:?}{}",
+          t.interface,
+          t.data.as_ref().map(|d| format!(" data={}", port(d))).unwrap_or_default()
+        ),
+        Step::Call(_, rel, args, ret) => format!("{} = call {rel:?} ({})", port(ret), ports(args)),
+        Step::Const(_, rel, p) => format!("{} = const {rel:?}", port(p)),
+        Step::Link(a, b) => format!("link {} ~ {}", port(a), port(b)),
+        Step::Composite(p, ps) => format!("{} = ({})", port(p), ports(ps)),
+        other => format!("{other:?}"),
+      };
+      writeln!(s, "  {t}").unwrap();
+    }
+  }
+  s
+}

@@ -1,4 +1,6 @@
-use std::{collections::HashMap, fmt, mem::take};
+use std::{collections::HashMap, env, fmt, mem::take};
+
+use frames::program::Program;
 
 use ivy::{
   guide,
@@ -15,6 +17,7 @@ use crate::{
     distiller::Distiller,
     emitter::{emit, insert_main_net},
     finder::FinderCache,
+    frames::FramesEmitter,
     layouter::{Layout, Layouter},
     loader::{FileId, Module},
     normalizer::normalize,
@@ -34,7 +37,7 @@ use crate::{
     signatures::Signatures,
     specializations::{ImplTreeKind, SpecKind, Specializations},
     template::Template,
-    vir::Vir,
+    vir::{self, Vir},
   },
 };
 
@@ -136,6 +139,9 @@ impl Compiler {
       )
       .resolve_rels(&mut vir.rels);
       analyze(chart, distiller.diags, fragment.tir.span, &mut vir);
+      if env::var("DUMP_VIR").is_ok_and(|p| fragment.path.ends_with(&p)) {
+        eprintln!("{}", vir::dump(&vir));
+      }
       self.vir.push_to(fragment_id, vir);
     }
 
@@ -241,6 +247,25 @@ impl Compiler {
 
     self.diags.bail()?;
     Ok(layouts)
+  }
+
+  /// Compiles the program for the frames runtime.
+  pub fn frames_program(&mut self) -> Result<Program, ErrorGuaranteed> {
+    let Some(main) = self.resolutions.main else {
+      let what = "a program without `main`".into();
+      return Err(self.diags.error(Diag::FramesUnsupported { span: Span::NONE, what }));
+    };
+    let main = self.specs.lookup[main][&Vec::new()];
+    FramesEmitter::new(
+      &self.chart,
+      &self.sigs,
+      &self.resolutions,
+      &self.fragments,
+      &self.vir,
+      &self.specs,
+      &mut self.diags,
+    )
+    .emit(main)
   }
 
   pub fn entrypoint_name(&mut self, table: &mut Table, entrypoint: FragmentId) -> NameId {

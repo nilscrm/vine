@@ -30,6 +30,10 @@ pub struct RunArgs {
 }
 
 impl RunArgs {
+  pub fn no_stats(&self) -> bool {
+    self.no_stats
+  }
+
   /// Run the nets forwarding stdin and stdout, exiting if any errors occur.
   pub fn run(&self, table: &mut Table, nets: &HashMap<NameId, FlatNet>, debug_hint: bool) {
     let mut heap = self.heap();

@@ -1397,6 +1397,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "frames",
  "glob",
  "ivm",
  "ivy",

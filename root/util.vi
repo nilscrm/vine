@@ -37,6 +37,7 @@ pub unsafe fn duplicate[T](&value: &T) -> T {
 
 #[builtin = "duplicate"]
 pub unsafe impl duplicate[T]: Fork[T] {
+  #[intrinsic = "duplicate"]
   unsafe fn fork(&self: &T) -> T {
     duplicate(&self)
   }
@@ -50,6 +51,7 @@ pub unsafe fn erase[T](value: T) {
 
 #[builtin = "erase"]
 pub unsafe impl erase[T]: Drop[T] {
+  #[intrinsic = "erase"]
   unsafe fn drop(self: T) {
     erase(self)
   }

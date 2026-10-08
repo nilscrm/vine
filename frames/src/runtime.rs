@@ -86,6 +86,8 @@ pub struct Runtime<'p, 'h> {
   ready: Vec<Addr>,
   halted: bool,
   scratch: Vec<u64>,
+  /// Whether to print each block as it is run.
+  pub trace: bool,
 }
 
 impl<'p, 'h> Runtime<'p, 'h> {
@@ -108,6 +110,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
       ready: Vec::new(),
       halted: false,
       scratch: Vec::new(),
+      trace: false,
     })
   }
 
@@ -180,6 +183,10 @@ impl<'p, 'h> Runtime<'p, 'h> {
     let block = &program.blocks[BlockId(code as usize)];
     let unit = &program.units[block.unit];
     self.stats.blocks_run += 1;
+    if self.trace {
+      let words = self.heap.slice(frame.offset(1), block.frame_size());
+      eprintln!("run b{} ({} @ {:?}) {words:?}", code, unit.name, block.entry);
+    }
     if self.regs.len() < unit.regs as usize {
       self.regs.resize(unit.regs as usize, 0);
     }

@@ -307,6 +307,10 @@ diags! {
     ["the `#[frameless]` attribute can only be applied to a function"]
   BadIntrinsicAttr
     ["the `#[intrinsic]` attribute can only be applied to a function"]
+  FramesUnsupported { what: String }
+    ["not yet supported by the frames backend: {what}"]
+  TransmuteSize { from: u32, to: u32 }
+    ["cannot transmute a value of {from} words into a value of {to} words"]
   NotPlainData { intrinsic: &'static str, ty: String }
     ["`{intrinsic}` is used on `{ty}`, which is not plain data; implement `Fork` and `Drop` instead"]
   InfiniteSize { ty: String }

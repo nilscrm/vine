@@ -1,3 +1,7 @@
+use frames::{
+  ops::Ops,
+  runtime::{Host as FramesHost, Runtime},
+};
 use std::{
   collections::HashMap,
   env,
@@ -221,10 +225,43 @@ pub struct VineRunCommand {
   optimizations: Optimizations,
   #[command(flatten)]
   run_args: RunArgs,
+  /// Run the program on the frames runtime, rather than IVM.
+  #[arg(long)]
+  frames: bool,
 }
 
 impl VineRunCommand {
   pub fn execute(self) -> Result<()> {
+    if self.frames {
+      let (_, _, mut compiler) = self.compile.compile();
+      let result = compiler.frames_program();
+      eprint_diags(&compiler);
+      let Ok(program) = result else { exit(1) };
+      if env::var("FRAMES_DUMP").is_ok() {
+        eprintln!("{program}");
+      }
+      let ops = Ops::new();
+      let mut runtime = Runtime::new(&program, &ops, FramesHost::stdio())?;
+      runtime.trace = env::var("FRAMES_TRACE").is_ok();
+      let result = runtime.run();
+      if !self.run_args.no_stats() {
+        let stats = &runtime.stats;
+        eprintln!(
+          "\nframes: {} blocks, {} instructions, {} frames, {} heap words at peak, {} objects leaked, {:?}",
+          stats.blocks_run,
+          stats.instructions,
+          stats.frames,
+          runtime.heap.stats.peak_words,
+          runtime.heap.live_objects(),
+          stats.time,
+        );
+      }
+      if let Err(err) = result {
+        eprintln!("error: {err}");
+        exit(1);
+      }
+      return Ok(());
+    }
     let (ref mut table, mut nets, compiler) = self.compile.compile();
     backend(table, &self.optimizations.into_config(Target::Ivm, None), &mut nets);
     self.run_args.run(table, &nets, !compiler.debug);
