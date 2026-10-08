@@ -1,11 +1,14 @@
 use frames::{
   ops::Ops,
-  program::{Block, BlockId, Instr, Instr::*, IoOp, Label, Program, Reg},
+  program::{Block, BlockId, Instr, Instr::*, IoOp, Label, Program, Reg, Unit},
   runtime::{Host, Runtime, RuntimeError},
 };
 
-fn block(name: &str, slots: u16, frame_size: u32, regs: u32, code: Vec<Instr>) -> Block {
-  Block { name: name.into(), slots, frame_size, regs, code }
+/// Adds a unit, with a block entering it at its start, whose frame of
+/// `frame_size` words is loaded into the first registers.
+fn add(program: &mut Program, name: &str, frame_size: u32, regs: u32, code: Vec<Instr>) -> BlockId {
+  let unit = program.units.push(Unit { name: name.into(), regs, code });
+  program.blocks.push(Block { unit, entry: Label(0), frame: (0..frame_size).map(Reg).collect() })
 }
 
 fn r(n: u32) -> Reg {
@@ -33,9 +36,9 @@ fn run(program: &Program) -> Result<(String, u64), RuntimeError> {
 #[test]
 fn hello() {
   let mut program = Program::default();
-  program.entry = program.blocks.push(block(
+  program.entry = add(
+    &mut program,
     "entry",
-    0,
     0,
     2,
     vec![
@@ -47,7 +50,7 @@ fn hello() {
       Halt,
       End,
     ],
-  ));
+  );
   assert_eq!(run(&program), Ok(("hi".into(), 0)));
 }
 
@@ -65,9 +68,9 @@ fn factorial_program(n: u64) -> Program {
   program.entry = entry;
 
   // entry: fact(n, space(done))
-  _ = program.blocks.push(block(
+  _ = add(
+    &mut program,
     "entry",
-    0,
     0,
     4,
     vec![
@@ -79,12 +82,12 @@ fn factorial_program(n: u64) -> Program {
       Fill { frame: r(2), offset: 2, src: r(1), len: 1 },
       End,
     ],
-  ));
+  );
 
   // fact: r0 = n, r1 = ret
-  _ = program.blocks.push(block(
+  _ = add(
+    &mut program,
     "fact",
-    2,
     2,
     8,
     vec![
@@ -107,12 +110,12 @@ fn factorial_program(n: u64) -> Program {
       Fill { frame: r(6), offset: 2, src: r(5), len: 1 },
       End,
     ],
-  ));
+  );
 
   // cont: r0 = n, r1 = ret, r2 = fact(n - 1)
-  _ = program.blocks.push(block(
+  _ = add(
+    &mut program,
     "cont",
-    3,
     3,
     4,
     vec![
@@ -120,16 +123,16 @@ fn factorial_program(n: u64) -> Program {
       Write { space: r(1), src: r(3), len: 1 },
       End,
     ],
-  ));
+  );
 
   // done: r0 = result; prints its low byte
-  _ = program.blocks.push(block(
+  _ = add(
+    &mut program,
     "done",
-    1,
     1,
     2,
     vec![Const { dst: r(1), value: 0 }, print(r(1), r(0)), Halt, End],
-  ));
+  );
 
   program
 }
@@ -171,14 +174,14 @@ fn hole_program(forward_after: usize) -> Program {
   ];
   code.extend(parts.into_iter().flatten());
   code.push(End);
-  program.entry = program.blocks.push(block("entry", 0, 0, 7, code));
-  _ = program.blocks.push(block(
+  program.entry = add(&mut program, "entry", 0, 7, code);
+  _ = add(
+    &mut program,
     "done",
-    1,
     2,
     3,
     vec![Const { dst: r(2), value: 0 }, print(r(2), r(0)), print(r(2), r(1)), Halt, End],
-  ));
+  );
   program
 }
 
@@ -213,8 +216,35 @@ fn hole_take() {
     Halt,
     End,
   ];
-  program.entry = program.blocks.push(block("entry", 0, 0, 10, code));
+  program.entry = add(&mut program, "entry", 0, 10, code);
   assert_eq!(run(&program), Ok(("0ab".into(), 0)));
+}
+
+#[test]
+fn continuation() {
+  // A unit that suspends, and is resumed at a label within it, with the
+  // continuation frame's word loaded into a register other than the first.
+  let mut program = Program::default();
+  let unit = program.units.push(Unit {
+    name: "unit".into(),
+    regs: 8,
+    code: vec![
+      // 0: entry
+      NewFrame { dst: r(1), block: BlockId(1) },
+      Space { dst: r(2), frame: r(1), offset: 1 },
+      Const { dst: r(0), value: b'z' as u64 },
+      Write { space: r(2), src: r(0), len: 1 },
+      End,
+      // 5: continuation; r7 is loaded from the frame
+      Const { dst: r(6), value: 0 },
+      print(r(6), r(7)),
+      Halt,
+      End,
+    ],
+  });
+  program.entry = program.blocks.push(Block { unit, entry: Label(0), frame: vec![] });
+  _ = program.blocks.push(Block { unit, entry: Label(5), frame: vec![r(7)] });
+  assert_eq!(run(&program), Ok(("z".into(), 0)));
 }
 
 #[test]
@@ -222,8 +252,8 @@ fn deadlock() {
   let mut program = Program::default();
   let waiting = BlockId(1);
   program.entry =
-    program.blocks.push(block("entry", 0, 0, 1, vec![NewFrame { dst: r(0), block: waiting }, End]));
-  _ = program.blocks.push(block("waiting", 1, 1, 1, vec![Halt, End]));
+    add(&mut program, "entry", 0, 1, vec![NewFrame { dst: r(0), block: waiting }, End]);
+  _ = add(&mut program, "waiting", 1, 1, vec![Halt, End]);
   assert_eq!(run(&program), Err(RuntimeError::Deadlock { waiting: 1 }));
 }
 
@@ -231,9 +261,9 @@ fn deadlock() {
 fn errors() {
   let mut program = Program::default();
   let div = program.op("n32:div");
-  program.entry = program.blocks.push(block(
+  program.entry = add(
+    &mut program,
     "entry",
-    0,
     0,
     2,
     vec![
@@ -242,10 +272,10 @@ fn errors() {
       Op { op: div, args: vec![r(0), r(1)], rets: vec![r(0)] },
       End,
     ],
-  ));
+  );
   assert_eq!(run(&program), Err(RuntimeError::InvalidOp("n32:div")));
 
   let mut program = Program::default();
-  program.entry = program.blocks.push(block("entry", 0, 0, 0, vec![Panic { msg: "oh no".into() }]));
+  program.entry = add(&mut program, "entry", 0, 0, vec![Panic { msg: "oh no".into() }]);
   assert_eq!(run(&program), Err(RuntimeError::Panic("oh no".into())));
 }

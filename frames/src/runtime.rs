@@ -13,9 +13,9 @@ use crate::{
   program::{BlockId, Instr, IoOp, OpId, Program, Reg},
 };
 
-/// A frame header holds the number of unfilled slots (including the code, if
-/// it has not been supplied yet) in its high bits, and the code in its low
-/// bits.
+/// A frame header holds the number of words still to be written (plus one for
+/// the code, if it has not been supplied yet) in its high bits, and the code in
+/// its low bits.
 const COUNTER_SHIFT: u32 = 48;
 const CODE_MASK: u64 = (1 << COUNTER_SHIFT) - 1;
 /// The code of a frame whose code has not been supplied yet.
@@ -90,6 +90,9 @@ pub struct Runtime<'p, 'h> {
 
 impl<'p, 'h> Runtime<'p, 'h> {
   pub fn new(program: &'p Program, ops: &'p Ops, host: Host<'h>) -> Result<Self, RuntimeError> {
+    for block in program.blocks.values() {
+      assert!(block.frame_size() < (1 << (64 - COUNTER_SHIFT)) - 1, "frame too large");
+    }
     let ops = program
       .ops
       .values()
@@ -111,9 +114,8 @@ impl<'p, 'h> Runtime<'p, 'h> {
   /// Runs the program until there is no more work to do.
   pub fn run(&mut self) -> Result<(), RuntimeError> {
     let start = Instant::now();
-    let entry = self.new_frame(self.program.entry);
-    debug_assert_eq!(self.program.blocks[self.program.entry].slots, 0);
-    self.ready.push(entry);
+    debug_assert_eq!(self.program.blocks[self.program.entry].frame_size(), 0);
+    self.new_frame(self.program.entry);
     let result = self.run_ready();
     self.stats.time += start.elapsed();
     self.host.stdout.flush().map_err(|e| RuntimeError::Io(e.to_string()))?;
@@ -132,27 +134,36 @@ impl<'p, 'h> Runtime<'p, 'h> {
   }
 
   fn new_frame(&mut self, block_id: BlockId) -> Addr {
-    let block = &self.program.blocks[block_id];
-    let frame = self.heap.alloc(block.frame_size + 1);
-    self.heap.set(frame, ((block.slots as u64) << COUNTER_SHIFT) | block_id.0 as u64);
+    let size = self.program.blocks[block_id].frame_size();
+    let frame = self.heap.alloc(size + 1);
+    self.heap.set(frame, ((size as u64) << COUNTER_SHIFT) | block_id.0 as u64);
     self.stats.frames += 1;
+    if size == 0 {
+      self.ready.push(frame);
+    }
     frame
   }
 
   fn fill(&mut self, frame: Addr, offset: u32, src: Reg, len: u32) {
     let src = &self.regs[src.0 as usize..][..len as usize];
     self.heap.slice_mut(frame.offset(offset), len).copy_from_slice(src);
-    self.decrement(frame);
+    self.decrement(frame, len);
   }
 
   fn fill_words(&mut self, frame: Addr, offset: u32, words: &[u64]) {
     self.heap.slice_mut(frame.offset(offset), words.len() as u32).copy_from_slice(words);
-    self.decrement(frame);
+    self.decrement(frame, words.len() as u32);
   }
 
-  fn decrement(&mut self, frame: Addr) {
-    debug_assert!(self.heap.get(frame) >> COUNTER_SHIFT != 0, "slot filled twice");
-    let header = self.heap.get(frame) - (1 << COUNTER_SHIFT);
+  /// Records that `len` more words of `frame` have been written (or that its
+  /// code has been supplied, with `len` of `1`).
+  fn decrement(&mut self, frame: Addr, len: u32) {
+    if len == 0 {
+      return;
+    }
+    let header = self.heap.get(frame);
+    debug_assert!(header >> COUNTER_SHIFT >= len as u64, "frame overfilled");
+    let header = header - ((len as u64) << COUNTER_SHIFT);
     self.heap.set(frame, header);
     if header >> COUNTER_SHIFT == 0 {
       self.ready.push(frame);
@@ -166,20 +177,21 @@ impl<'p, 'h> Runtime<'p, 'h> {
       self.forward(frame, (code & !CODE_FORWARD) as u32);
       return Ok(());
     }
-    let block_id = BlockId(code as usize);
-    let block = &program.blocks[block_id];
+    let block = &program.blocks[BlockId(code as usize)];
+    let unit = &program.units[block.unit];
     self.stats.blocks_run += 1;
-    if self.regs.len() < block.regs as usize {
-      self.regs.resize(block.regs as usize, 0);
+    if self.regs.len() < unit.regs as usize {
+      self.regs.resize(unit.regs as usize, 0);
     }
-    let frame_size = block.frame_size;
-    self.regs[..frame_size as usize].copy_from_slice(self.heap.slice(frame.offset(1), frame_size));
-    self.heap.free(frame, frame_size + 1);
+    for (i, reg) in block.frame.iter().enumerate() {
+      self.regs[reg.0 as usize] = self.heap.get(frame.offset(i as u32 + 1));
+    }
+    self.heap.free(frame, block.frame_size() + 1);
 
-    let mut pc = 0;
+    let mut pc = block.entry.0 as usize;
     loop {
       self.stats.instructions += 1;
-      match &block.code[pc] {
+      match &unit.code[pc] {
         Instr::Const { dst, value } => self.regs[dst.0 as usize] = *value,
         Instr::Move { dst, src, len } => {
           let src = src.0 as usize;
@@ -231,8 +243,6 @@ impl<'p, 'h> Runtime<'p, 'h> {
         }
         Instr::Split { space, offsets, dsts } => {
           let (frame, base) = decode_space(self.regs[space.0 as usize]);
-          let extra = offsets.len() as u64 - 1;
-          self.heap.set(frame, self.heap.get(frame) + (extra << COUNTER_SHIFT));
           for (dst, offset) in dsts.iter().zip(offsets) {
             self.regs[dst.0 as usize] = encode_space(frame, base + offset);
           }
@@ -240,7 +250,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
 
         Instr::HoleNew { dst, len } => {
           let hole = self.heap.alloc(hole_size(*len));
-          self.heap.set(hole, (2 << COUNTER_SHIFT) | CODE_NONE);
+          self.heap.set(hole, ((*len as u64 + 1) << COUNTER_SHIFT) | CODE_NONE);
           self.regs[dst.0 as usize] = hole.0;
         }
         Instr::HoleOf { dst, src, len } => {
@@ -261,7 +271,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
           if header >> COUNTER_SHIFT == 1 {
             self.forward(hole, *len);
           } else {
-            self.decrement(hole);
+            self.decrement(hole, 1);
           }
         }
         Instr::HoleTake { hole, dst, len, ok } => {

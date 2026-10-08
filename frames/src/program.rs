@@ -2,6 +2,7 @@ use std::fmt;
 
 use vine_util::{idx::IdxVec, new_idx};
 
+new_idx!(pub UnitId; n => ["u{n}"]);
 new_idx!(pub BlockId; n => ["b{n}"]);
 new_idx!(pub OpId; n => ["op{n}"]);
 
@@ -35,6 +36,7 @@ impl fmt::Debug for Label {
 
 #[derive(Debug, Default, Clone)]
 pub struct Program {
+  pub units: IdxVec<UnitId, Unit>,
   pub blocks: IdxVec<BlockId, Block>,
   /// The primitive operations used by the program, by name; see
   /// [`Ops`](crate::ops::Ops).
@@ -54,18 +56,32 @@ impl Program {
   }
 }
 
+/// A unit of code, with its own register file; typically, everything compiled
+/// from one function. Code within a unit jumps between labels; it is entered
+/// through [`Block`]s.
 #[derive(Debug, Clone)]
-pub struct Block {
+pub struct Unit {
   pub name: String,
-  /// The number of slots in this block's frames; a frame becomes ready once
-  /// this many slots have been filled.
-  pub slots: u16,
-  /// The number of words in this block's frames, not including the header.
-  /// When the block is run, these are loaded into registers `0..frame_size`.
-  pub frame_size: u32,
-  /// The size of this block's register file.
+  /// The size of the unit's register file.
   pub regs: u32,
   pub code: Vec<Instr>,
+}
+
+/// An entry point into a unit, run when one of its frames becomes ready.
+#[derive(Debug, Clone)]
+pub struct Block {
+  pub unit: UnitId,
+  pub entry: Label,
+  /// The registers that the frame's words are loaded into; word `i` (at
+  /// offset `i + 1`) is loaded into register `frame[i]`. The frame becomes
+  /// ready once all of its words have been written.
+  pub frame: Vec<Reg>,
+}
+
+impl Block {
+  pub fn frame_size(&self) -> u32 {
+    self.frame.len() as u32
+  }
 }
 
 /// A bytecode instruction.
@@ -125,7 +141,8 @@ pub enum Instr {
     len: u32,
   },
 
-  /// Allocates a frame for `block`; none of its slots are filled.
+  /// Allocates a frame for `block`; none of its words are filled. A frame of
+  /// size zero is ready immediately.
   NewFrame {
     dst: Reg,
     block: BlockId,
@@ -150,8 +167,8 @@ pub enum Instr {
     len: u32,
   },
   /// Splits `space` into spaces for parts of its slot, at the given offsets
-  /// relative to the start of the slot; each of them must then be filled. The
-  /// frame then waits for `offsets.len() - 1` more writes.
+  /// relative to the start of the slot; each of them must then be filled,
+  /// instead of the slot as a whole.
   Split {
     space: Reg,
     offsets: Vec<u32>,
@@ -159,7 +176,7 @@ pub enum Instr {
   },
 
   /// Allocates a hole for a value of `len` words: a frame whose code has not
-  /// been supplied yet, with one slot for the value, at offset `1`.
+  /// been supplied yet, with the value at offset `1`.
   HoleNew {
     dst: Reg,
     len: u32,
