@@ -149,18 +149,14 @@ fn deep_recursion() {
   assert_eq!(live, 0);
 }
 
-/// Creates a hole for a two-word value, filled in two parts through spaces;
-/// the hole's value is forwarded into a frame, before, between, or after the
-/// parts are filled.
+/// Creates a hole for a two-word value, whose space is split in two, and
+/// filled in two parts; the hole's value is forwarded into a frame, before,
+/// between, or after the parts are filled.
 fn hole_program(forward_after: usize) -> Program {
   let mut program = Program::default();
   let done = BlockId(1);
   let fill = |part: u32, char: u8| {
-    vec![
-      Space { dst: r(4), frame: r(0), offset: 1 + part },
-      Const { dst: r(3), value: char as u64 },
-      Write { space: r(4), src: r(3), len: 1 },
-    ]
+    vec![Const { dst: r(3), value: char as u64 }, Write { space: r(5 + part), src: r(3), len: 1 }]
   };
   let forward = vec![
     NewFrame { dst: r(1), block: done },
@@ -169,10 +165,14 @@ fn hole_program(forward_after: usize) -> Program {
   ];
   let mut parts = vec![fill(0, b'h'), fill(1, b'i')];
   parts.insert(forward_after, forward);
-  let mut code = vec![HoleNew { dst: r(0), slots: 2, len: 2 }];
+  let mut code = vec![
+    HoleNew { dst: r(0), len: 2 },
+    Space { dst: r(4), frame: r(0), offset: 1 },
+    Split { space: r(4), offsets: vec![0, 1], dsts: vec![r(5), r(6)] },
+  ];
   code.extend(parts.into_iter().flatten());
   code.push(End);
-  program.entry = program.blocks.push(block("entry", 0, 0, 5, code));
+  program.entry = program.blocks.push(block("entry", 0, 0, 7, code));
   _ = program.blocks.push(block(
     "done",
     1,
@@ -196,7 +196,7 @@ fn hole_take() {
   // filled, or for a hole created with `HoleOf`.
   let mut program = Program::default();
   let code = vec![
-    HoleNew { dst: r(0), slots: 1, len: 1 },
+    HoleNew { dst: r(0), len: 1 },
     HoleTake { hole: r(0), dst: r(1), len: 1, ok: r(2) },
     Const { dst: r(9), value: 0 },
     Const { dst: r(3), value: b'0' as u64 },

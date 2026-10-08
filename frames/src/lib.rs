@@ -12,6 +12,10 @@
 //! are copied into the start of the block's register file, and the frame is
 //! freed.
 //!
+//! A space is a single word, however large the slot it points to. A space
+//! can be split into spaces for parts of its slot (e.g. the fields of a
+//! tuple); the frame then waits for one more write for each additional part.
+//!
 //! There are no return values: a function receives a space as an argument, and
 //! "returns" by writing its result into it, which may make the caller's
 //! continuation frame ready.

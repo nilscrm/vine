@@ -163,13 +163,19 @@ pub enum Instr {
     src: Reg,
     len: u32,
   },
+  /// Splits `space` into spaces for parts of its slot, at the given offsets
+  /// relative to the start of the slot; each of them must then be filled. The
+  /// frame then waits for `offsets.len() - 1` more writes.
+  Split {
+    space: Reg,
+    offsets: Vec<u32>,
+    dsts: Vec<Reg>,
+  },
 
   /// Allocates a hole for a value of `len` words: a frame whose code has not
-  /// been supplied yet. The value is filled through spaces pointing into it,
-  /// in `slots` parts; the value occupies offsets `1..=len`.
+  /// been supplied yet, with one slot for the value, at offset `1`.
   HoleNew {
     dst: Reg,
-    slots: u16,
     len: u32,
   },
   /// Allocates a hole whose value has already been filled.

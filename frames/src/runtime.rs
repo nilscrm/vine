@@ -237,18 +237,24 @@ impl<'p, 'h> Runtime<'p, 'h> {
           self.fill(self.addr(*frame), *offset, *src, *len);
         }
         Instr::Space { dst, frame, offset } => {
-          debug_assert!(*offset < 1 << SPACE_OFFSET_BITS);
-          let frame = self.regs[frame.0 as usize];
-          self.regs[dst.0 as usize] = (frame << SPACE_OFFSET_BITS) | *offset as u64;
+          self.regs[dst.0 as usize] = encode_space(self.addr(*frame), *offset);
         }
         Instr::Write { space, src, len } => {
           let (frame, offset) = decode_space(self.regs[space.0 as usize]);
           self.fill(frame, offset, *src, *len);
         }
+        Instr::Split { space, offsets, dsts } => {
+          let (frame, base) = decode_space(self.regs[space.0 as usize]);
+          let extra = offsets.len() as u64 - 1;
+          self.heap.set(frame, self.heap.get(frame) + (extra << COUNTER_SHIFT));
+          for (dst, offset) in dsts.iter().zip(offsets) {
+            self.regs[dst.0 as usize] = encode_space(frame, base + offset);
+          }
+        }
 
-        Instr::HoleNew { dst, slots, len } => {
+        Instr::HoleNew { dst, len } => {
           let hole = self.heap.alloc(hole_size(*len));
-          self.heap.set(hole, ((*slots as u64 + 1) << COUNTER_SHIFT) | CODE_NONE);
+          self.heap.set(hole, (2 << COUNTER_SHIFT) | CODE_NONE);
           self.regs[dst.0 as usize] = hole.0;
         }
         Instr::HoleOf { dst, src, len } => {
@@ -448,6 +454,11 @@ impl Loc {
 enum Free {
   Value(Loc, LayoutId),
   Object(Addr, u32),
+}
+
+fn encode_space(frame: Addr, offset: u32) -> u64 {
+  debug_assert!(offset < 1 << SPACE_OFFSET_BITS);
+  (frame.0 << SPACE_OFFSET_BITS) | offset as u64
 }
 
 fn decode_space(space: u64) -> (Addr, u32) {
