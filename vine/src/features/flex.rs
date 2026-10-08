@@ -16,7 +16,10 @@ impl Finder<'_> {
     match types.kind(type_params[0]) {
       Some((Inverted(false), TypeKind::Fn(_))) | Some((_, TypeKind::Default)) => {
         if let Some(dup) = self.chart.builtins.duplicate {
-          found.push(TypeCtx { types: types.clone(), inner: TirImpl::Def(dup, vec![]) });
+          found.push(TypeCtx {
+            types: types.clone(),
+            inner: TirImpl::Def(dup, vec![TirImpl::LayoutOf(type_params[0])]),
+          });
         }
       }
       Some((Inverted(false), TypeKind::Closure(id, flex, ..))) if flex.fork() => {
@@ -35,7 +38,10 @@ impl Finder<'_> {
     match types.kind(type_params[0]) {
       Some((Inverted(false), TypeKind::Fn(_))) | Some((_, TypeKind::Default)) => {
         if let Some(erase) = self.chart.builtins.erase {
-          found.push(TypeCtx { types: types.clone(), inner: TirImpl::Def(erase, vec![]) });
+          found.push(TypeCtx {
+            types: types.clone(),
+            inner: TirImpl::Def(erase, vec![TirImpl::LayoutOf(type_params[0])]),
+          });
         }
       }
       Some((Inverted(false), TypeKind::Closure(id, flex, ..))) if flex.drop() => {

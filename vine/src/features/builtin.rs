@@ -38,6 +38,7 @@ pub struct Builtins {
   pub fn_: Option<TraitId>,
   pub fork: Option<TraitId>,
   pub drop: Option<TraitId>,
+  pub layout: Option<TraitId>,
   pub duplicate: Option<ImplId>,
   pub erase: Option<ImplId>,
 
@@ -118,6 +119,7 @@ impl Charter<'_> {
       "Fn" => set(&mut b.fn_, trait_id),
       "Fork" => set(&mut b.fork, trait_id),
       "Drop" => set(&mut b.drop, trait_id),
+      "Layout" => set(&mut b.layout, trait_id),
       "duplicate" => set(&mut b.duplicate, impl_id),
       "erase" => set(&mut b.erase, impl_id),
       "bool_not" => set(&mut b.bool_not, impl_id),

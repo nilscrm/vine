@@ -9,7 +9,7 @@ use crate::{
     chart::{FnId, ImplId},
     diag::ErrorGuaranteed,
     resolutions::{ConstRelId, FnRelId, FragmentId},
-    tir::ClosureId,
+    tir::{ClosureId, LayoutKind},
     vir::StageId,
   },
 };
@@ -68,4 +68,5 @@ pub enum ImplTreeKind {
   ForkClosure(FragmentId, Vec<ImplTreeId>, ClosureId),
   DropClosure(FragmentId, Vec<ImplTreeId>, ClosureId),
   Synthetic(SyntheticImpl),
+  Layout(LayoutKind, Vec<ImplTreeId>),
 }

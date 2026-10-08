@@ -9,10 +9,10 @@ use crate::{
   components::synthesizer::SyntheticImpl,
   structures::{
     ast::{Flex, LogicalOp, Span},
-    chart::{EnumId, FnId, ImplId, VariantId},
+    chart::{ConcreteConstId, EnumId, FnId, ImplId, OpaqueTypeId, StructId, UnionId, VariantId},
     diag::ErrorGuaranteed,
     resolutions::{ConstRelId, FnRelId, Rels},
-    types::{Type, Types},
+    types::{TransferTypes, Type, TypeTransfer, Types},
   },
 };
 
@@ -193,6 +193,51 @@ pub enum TirImpl {
   ForkClosure(ClosureId),
   DropClosure(ClosureId),
   Synthetic(SyntheticImpl),
+  /// The layout of a type in the current fragment's type context; only used
+  /// during resolution, until types have been inferred, after which it is
+  /// replaced with [`TirImpl::Layout`].
+  LayoutOf(Type),
+  /// A layout, with the layouts of the type's parameters (or fields).
+  Layout(LayoutKind, Vec<TirImpl>),
+}
+
+/// The kind of a layout; see [`TirImpl::Layout`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LayoutKind {
+  /// No data; e.g. nil, functions, and `!`.
+  Empty,
+  /// A space.
+  Space,
+  /// A tuple or object; the children are the layouts of its fields.
+  Composite,
+  Struct(StructId),
+  Enum(EnumId),
+  Union(UnionId),
+  Opaque(OpaqueTypeId),
+  /// The layout of a type that depends on a constant: the children are the
+  /// layouts of the two branches, laid out like an untagged union.
+  IfConst(ConcreteConstId),
+  /// A reference: a value, followed by a space.
+  Ref,
+  /// A closure: a pointer to its captured state.
+  Closure,
+}
+
+impl TransferTypes for TirImpl {
+  fn transfer(&self, t: &mut TypeTransfer<'_>) -> Self {
+    match self {
+      TirImpl::Def(id, impls) => TirImpl::Def(*id, t.transfer(impls)),
+      TirImpl::Fn(id, impls, params) => TirImpl::Fn(*id, t.transfer(impls), *params),
+      TirImpl::LayoutOf(ty) => TirImpl::LayoutOf(t.transfer(ty)),
+      TirImpl::Layout(kind, children) => TirImpl::Layout(kind.clone(), t.transfer(children)),
+      TirImpl::Error(_)
+      | TirImpl::Param(_)
+      | TirImpl::Closure(_)
+      | TirImpl::ForkClosure(_)
+      | TirImpl::DropClosure(_)
+      | TirImpl::Synthetic(_) => self.clone(),
+    }
+  }
 }
 
 impl TirExpr {

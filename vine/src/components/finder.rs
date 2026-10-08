@@ -166,10 +166,11 @@ impl<'a> Finder<'a> {
     let [fork, drop] = if inv.0 { [neg_fork, neg_drop] } else { [pos_fork, pos_drop] };
 
     let [(fork_ty, fork), (drop_ty, drop)] = [fork, drop].map(|result| {
-      (
-        result.as_ref().map(|result| types.import_with(result, None, |t, _| t.transfer(&sub_ty))),
-        result.map(|result| result.inner),
-      )
+      result
+        .map(|result| {
+          types.import_with(&result, None, |t, impl_| (t.transfer(&sub_ty), t.transfer(impl_)))
+        })
+        .unzip()
     });
 
     if let (Some(fork_ty), Some(drop_ty)) = (fork_ty, drop_ty)
@@ -223,11 +224,12 @@ impl<'a> Finder<'a> {
 
     let result = results.pop().unwrap();
 
-    let result_ty = types.import_with(&result, None, |t, _| t.transfer(&sub_query));
+    let (result_ty, impl_) =
+      types.import_with(&result, None, |t, impl_| (t.transfer(&sub_query), t.transfer(impl_)));
     let unify_result = types.unify_impl_type(query, &result_ty);
     assert!(!unify_result.is_failure());
 
-    Ok(result.inner)
+    Ok(impl_)
   }
 
   fn _find_impl(
@@ -236,6 +238,14 @@ impl<'a> Finder<'a> {
     query: &ImplType,
     basic: bool,
   ) -> Result<Vec<TypeCtx<TirImpl>>, Error> {
+    if let ImplType::Trait(trait_id, params) = query
+      && Some(*trait_id) == self.chart.builtins.layout
+    {
+      // Layouts are computed once types have been inferred; see
+      // `TirImpl::LayoutOf`.
+      return Ok(vec![TypeCtx { types: types.clone(), inner: TirImpl::LayoutOf(params[0]) }]);
+    }
+
     self.step()?;
 
     let mut found = Vec::new();

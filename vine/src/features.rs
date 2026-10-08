@@ -22,6 +22,7 @@ pub mod index;
 pub mod inline_ivy;
 pub mod inverse;
 pub mod labels;
+pub mod layout;
 pub mod let_;
 pub mod list;
 pub mod local;

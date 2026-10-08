@@ -9,6 +9,7 @@ use crate::{
     parser::{BRACE, Parser},
     resolver::Resolver,
   },
+  features::layout::LayoutResolver,
   structures::{
     ast::{Attr, ConstItem, Flex, FnItem, ImplItem, ImplItemKind, ItemKind, Path, Span, Vis},
     chart::{
@@ -22,7 +23,7 @@ use crate::{
     resolutions::{Become, ResolvedImpl, ResolvedImplKind},
     signatures::ImplSig,
     tir::TirImpl,
-    types::{ImplType, Type, TypeCtx, TypeKind},
+    types::{ImplType, Type, TypeCtx, TypeKind, Types},
   },
   tools::fmt::Formatter,
 };
@@ -416,6 +417,12 @@ impl Resolver<'_> {
             ResolvedImplKind::Indirect(self.find_impl(span, &ty, true))
           }
         };
+        let mut kind = kind;
+        if let ResolvedImplKind::Indirect(impl_) = &mut kind {
+          let generics = self.chart.impls[impl_id].generics;
+          LayoutResolver::new(self.chart, self.sigs, self.diags, &mut self.types, generics, span)
+            .resolve_impl(impl_);
+        }
         Ok(ResolvedImpl { kind, trait_id: *trait_id, become_: Become::Unresolved })
       }
       ImplType::Error(err) => Err(*err),
@@ -430,7 +437,10 @@ impl Resolver<'_> {
     resolved.become_ = Become::Resolving;
     let trait_id = resolved.trait_id;
     let become_ = match self._resolve_impl_become(impl_id, trait_id, impl_def) {
-      Ok(become_) => Become::Resolved(become_),
+      Ok(become_) => Become::Resolved(become_.map(|(target, indices)| {
+        let args = self.become_args(impl_id, target);
+        (target, indices, args)
+      })),
       Err(diag) => {
         self.diags.error(diag);
         Become::Resolved(None)
@@ -464,7 +474,8 @@ impl Resolver<'_> {
         if self.resolutions.impls[become_id].as_ref().map_err(|&e| e)?.trait_id != trait_id {
           Err(Diag::BecomeOtherTrait { span: become_path.span })?
         }
-        if !self.sigs.impl_params[self.chart.impls[become_id].generics].types.inner.is_empty() {
+        let become_generics = self.chart.impls[become_id].generics;
+        if self.sigs.impl_params[become_generics].types.inner.iter().any(|ty| !self.is_layout(ty)) {
           Err(Diag::BecomeGenericImpl { span: become_path.span })?
         }
         Some((become_id, necessary_params))
@@ -473,13 +484,48 @@ impl Resolver<'_> {
         ResolvedImplKind::Direct { .. } => self.sigs.impl_params[impl_def.generics]
           .types
           .inner
-          .is_empty()
+          .iter()
+          .all(|ty| self.is_layout(ty))
           .then_some((impl_id, Vec::new())),
         ResolvedImplKind::Indirect(impl_) => {
           self.resolve_tir_impl_become(&impl_.clone(), None).map(|id| (id, necessary_params))
         }
       },
     })
+  }
+
+  /// Computes the implementation arguments for `target`, which `impl_id`
+  /// becomes; these can only be layouts, which are determined by the type
+  /// `impl_id` implements its trait for.
+  fn become_args(&mut self, impl_id: ImplId, target: ImplId) -> Vec<TirImpl> {
+    let impl_def = &self.chart.impls[impl_id];
+    let target_generics = self.chart.impls[target].generics;
+    let mut types = Types::default();
+    let type_params =
+      types.new_vars(impl_def.span, self.sigs.type_params[target_generics].params.len());
+    let target_ty = types.import(&self.sigs.impls[target], Some(&type_params)).ty;
+    let impl_ty = types.import(&self.sigs.impls[impl_id], None).ty;
+    _ = types.unify_impl_type(&target_ty, &impl_ty);
+    let queries = types.import(&self.sigs.impl_params[target_generics].types, Some(&type_params));
+    let mut args = queries
+      .into_iter()
+      .map(|query| match query {
+        ImplType::Trait(_, tys) => TirImpl::LayoutOf(tys[0]),
+        ImplType::Error(err) => TirImpl::Error(err),
+      })
+      .collect::<Vec<_>>();
+    let mut layouts = LayoutResolver::new(
+      self.chart,
+      self.sigs,
+      self.diags,
+      &mut types,
+      impl_def.generics,
+      impl_def.span,
+    );
+    for arg in &mut args {
+      layouts.resolve_impl(arg);
+    }
+    args
   }
 
   fn resolve_tir_impl_become(
@@ -489,7 +535,7 @@ impl Resolver<'_> {
   ) -> Option<ImplId> {
     match impl_ {
       TirImpl::Def(impl_id, args) => match self.resolve_impl_become(*impl_id) {
-        Become::Resolved(Some((impl_id, indices))) => indices
+        Become::Resolved(Some((impl_id, indices, _))) => indices
           .into_iter()
           .all(|i| self.resolve_tir_impl_become(&args[i], Some(impl_id)) == Some(impl_id))
           .then_some(impl_id),

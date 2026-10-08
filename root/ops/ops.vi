@@ -42,6 +42,13 @@ pub mod Cast {
   }
 }
 
+/// Describes how values of type `T` are stored; implemented automatically for
+/// every type. Each type parameter implicitly requires an implementation, so
+/// that generic code can be specialized for the layouts of its type
+/// parameters.
+#[builtin = "Layout"]
+pub unsafe trait[T] Layout {}
+
 #[builtin = "Fn"]
 pub trait[F] Fn[P, R] {
   fn .call(f: F, params: P) -> R;

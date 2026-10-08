@@ -21,6 +21,7 @@ use crate::{
     specializer::Specializer,
     synthesizer::synthesize,
   },
+  features::layout::LayoutResolver,
   structures::{
     annotations::Annotations,
     ast::{Ident, Span},
@@ -123,6 +124,15 @@ impl Compiler {
       hooks.distill(fragment_id, &mut vir);
       let mut vir =
         normalize(chart, &self.sigs, distiller.diags, distiller.finder_cache, fragment, &vir);
+      LayoutResolver::new(
+        chart,
+        &self.sigs,
+        distiller.diags,
+        &mut vir.types,
+        fragment.generics,
+        fragment.tir.span,
+      )
+      .resolve_rels(&mut vir.rels);
       analyze(chart, distiller.diags, fragment.tir.span, &mut vir);
       self.vir.push_to(fragment_id, vir);
     }
@@ -250,6 +260,7 @@ guide!(pub Guide {
   dbg: PathId = "vi:dbg",
   fn_: PathId = "vi:fn",
   graft: PathId = "vi:graft",
+  layout: PathId = "vi:layout",
   black_box: PathId = "iv:black_box",
 
   n32_and: NameId = "vi:n32:and",

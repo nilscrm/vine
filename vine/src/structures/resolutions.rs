@@ -30,11 +30,14 @@ pub struct ResolvedImpl {
   pub become_: Become,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Become {
   Unresolved,
   Resolving,
-  Resolved(Option<(ImplId, Vec<usize>)>),
+  /// The implementation this one becomes, the indices of this one's
+  /// implementation parameters which must also become it, and the
+  /// implementation arguments to pass to it (which can only be layouts).
+  Resolved(Option<(ImplId, Vec<usize>, Vec<TirImpl>)>),
 }
 
 #[derive(Debug)]

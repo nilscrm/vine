@@ -279,6 +279,13 @@ impl Resolver<'_> {
             self.diags.error(Diag::DuplicateImplParam { span: param.span });
           }
         }
+
+        if generics_def.impl_allowed {
+          for param in types {
+            let index = self.sigs.type_params[generics_id].lookup[&param.name];
+            self.push_layout_param(&mut impl_params, index);
+          }
+        }
       }
 
       GenericsKind::Trait { trait_id } => {
@@ -298,17 +305,44 @@ impl Resolver<'_> {
             let ty = self.types.new(TypeKind::Param(index, name.clone()));
             impl_params.types.inner.push(ImplType::Trait(trait_id, vec![ty]))
           }
+          for index in 0..self.sigs.type_params[generics_id].params.len() {
+            self.push_layout_param(&mut impl_params, index);
+          }
         }
       }
     }
 
-    if !generics_def.impl_allowed && !impl_params.types.inner.is_empty() {
+    if !generics_def.impl_allowed && impl_params.types.inner.iter().any(|ty| !self.is_layout(ty)) {
       impl_params = ImplParams::default();
       self.diags.error(Diag::UnexpectedImplParam { span: generics_def.span });
     }
 
     impl_params.types.types = take(&mut self.types);
     self.sigs.impl_params.push_to(generics_id, impl_params);
+  }
+
+  /// Adds the implicit `Layout` implementation parameter of a type parameter,
+  /// unless it already has one (inherited from a parent).
+  fn push_layout_param(&mut self, impl_params: &mut ImplParams, type_param: usize) {
+    let existing = impl_params.types.inner.iter().any(|ty| {
+      self.is_layout(ty)
+        && matches!(ty, ImplType::Trait(_, tys)
+          if matches!(self.types.kind(tys[0]), Some((_, TypeKind::Param(p, _))) if *p == type_param))
+    });
+    if existing {
+      return;
+    }
+    if let Some(layout) = self.chart.builtins.layout {
+      let name = self.sigs.type_params[self.cur_generics].params[type_param].clone();
+      let ty = self.types.new(TypeKind::Param(type_param, name));
+      impl_params.types.inner.push(ImplType::Trait(layout, vec![ty]));
+    }
+  }
+
+  /// Whether an implementation parameter is an implicit `Layout` parameter;
+  /// these are not written explicitly, and are always found automatically.
+  pub(crate) fn is_layout(&self, ty: &ImplType) -> bool {
+    matches!(ty, ImplType::Trait(trait_id, _) if Some(*trait_id) == self.chart.builtins.layout)
   }
 
   pub fn resolve_generics(
@@ -343,11 +377,17 @@ impl Resolver<'_> {
       // Things with no inference cannot have implementation parameters; skip
       // checking the signature as this may not have been resolved yet.
       if !inference { 0 } else { self.sigs.impl_params[generics_id].types.inner.len() };
-    if args.impls.len() > impl_param_count {
+    let explicit_impl_param_count = if impl_param_count == 0 {
+      0
+    } else {
+      let impl_params = &self.sigs.impl_params[generics_id].types.inner;
+      impl_params.iter().filter(|ty| !self.is_layout(ty)).count()
+    };
+    if args.impls.len() > explicit_impl_param_count {
       self.diags.error(Diag::BadGenericCount {
         span,
         path: self.chart.defs[params.def].path.clone(),
-        expected: impl_param_count,
+        expected: explicit_impl_param_count,
         got: args.impls.len(),
         kind: "impl",
       });
@@ -355,10 +395,10 @@ impl Resolver<'_> {
     let impl_args = if impl_param_count != 0 {
       let impl_params_types =
         self.types.import(&self.sigs.impl_params[generics_id].types, Some(&type_args));
+      let mut explicit = args.impls.iter();
       impl_params_types
         .into_iter()
-        .enumerate()
-        .map(|(i, ty)| match args.impls.get(i) {
+        .map(|ty| match (!self.is_layout(&ty)).then(|| explicit.next()).flatten() {
           Some(impl_) => self.resolve_impl_type(impl_, &ty),
           None => self.find_impl(args.span, &ty, false),
         })
@@ -442,7 +482,9 @@ impl Resolver<'_> {
     let type_params = &self.sigs.type_params[generics];
     let _impl_params = Default::default();
     let impl_params = if impl_params { &self.sigs.impl_params[generics] } else { &_impl_params };
-    if type_params.params.is_empty() && impl_params.types.inner.is_empty() {
+    let explicit_impl_params =
+      impl_params.types.inner.iter().filter(|ty| !self.is_layout(ty)).collect::<Vec<_>>();
+    if type_params.params.is_empty() && explicit_impl_params.is_empty() {
       return "".into();
     }
     let mut str = String::new();
@@ -455,10 +497,10 @@ impl Resolver<'_> {
       first = false;
       str += &param.0;
     }
-    if !impl_params.types.inner.is_empty() {
+    if !explicit_impl_params.is_empty() {
       str += "; ";
       first = true;
-      for ty in &impl_params.types.inner {
+      for ty in explicit_impl_params {
         if !first {
           str += ", ";
         }

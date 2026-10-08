@@ -17,7 +17,7 @@ use crate::{
     specializations::{
       ImplTree, ImplTreeId, ImplTreeKind, Spec, SpecId, SpecKind, SpecRels, Specializations,
     },
-    tir::{ClosureId, TirImpl},
+    tir::{ClosureId, LayoutKind, TirImpl},
     vir::{InterfaceKind, StageId, Vir},
   },
 };
@@ -43,6 +43,12 @@ impl<'a> Specializer<'a> {
   }
 
   fn specialize(&mut self, id: FragmentId, impl_args: Vec<ImplTreeId>) -> SpecId {
+    debug_assert_eq!(
+      impl_args.len(),
+      self.fragments[id].impl_params,
+      "{}",
+      self.fragments[id].path
+    );
     let spec_id = self.specs.specs.next_index();
     let lookup = self.specs.lookup.get_or_extend(id);
     let entry = match lookup.entry(impl_args) {
@@ -100,7 +106,8 @@ impl<'a> Specializer<'a> {
             ImplTreeKind::Fn(..)
             | ImplTreeKind::Closure(..)
             | ImplTreeKind::ForkClosure(..)
-            | ImplTreeKind::DropClosure(..) => unreachable!(),
+            | ImplTreeKind::DropClosure(..)
+            | ImplTreeKind::Layout(..) => unreachable!(),
             ImplTreeKind::Def(impl_id, inner_impls) => {
               let mut inner_impls = inner_impls.clone();
               match &self.resolutions.impls[*impl_id].as_ref()?.kind {
@@ -189,6 +196,7 @@ impl<'a> Specializer<'a> {
               let item = impl_.fn_(self.chart, fn_id);
               Ok((self.instantiate_synthetic_item(item, impls), StageId(0)))
             }
+            ImplTreeKind::Layout(..) => unreachable!(),
           };
         }
       }
@@ -240,15 +248,19 @@ impl<'a> Specializer<'a> {
       TirImpl::Def(id, impls) => {
         let impls =
           impls.iter().map(|i| self.instantiate(fragment_id, args, i)).collect::<Vec<_>>();
-        if let Ok(ResolvedImpl { become_: Become::Resolved(Some((become_impl, indices))), .. }) =
-          &self.resolutions.impls[*id]
-          && indices
-            .iter()
-            .all(|&i| matches!(self.specs.impls[impls[i]].kind, ImplTreeKind::Def(id, _) if id == *become_impl))
+        if let Ok(ResolvedImpl {
+          become_: Become::Resolved(Some((become_impl, indices, become_args))),
+          ..
+        }) = &self.resolutions.impls[*id]
+          && indices.iter().all(|&i| {
+            matches!(self.specs.impls[impls[i]].kind, ImplTreeKind::Def(id, _) if id == *become_impl)
+          })
         {
-           self.add_impl_tree(ImplTreeKind::Def(*become_impl, vec![]))
+          let become_args =
+            become_args.iter().map(|arg| self.instantiate(None, &impls, arg)).collect();
+          self.add_impl_tree(ImplTreeKind::Def(*become_impl, become_args))
         } else {
-        self.add_impl_tree(ImplTreeKind::Def(*id, impls))
+          self.add_impl_tree(ImplTreeKind::Def(*id, impls))
         }
       }
       TirImpl::Fn(id, impls, params) => {
@@ -267,6 +279,11 @@ impl<'a> Specializer<'a> {
       TirImpl::Synthetic(synthetic) => {
         self.add_impl_tree(ImplTreeKind::Synthetic(synthetic.clone()))
       }
+      TirImpl::Layout(kind, children) => {
+        let children = children.iter().map(|c| self.instantiate(fragment_id, args, c)).collect();
+        self.add_impl_tree(ImplTreeKind::Layout(kind.clone(), children))
+      }
+      TirImpl::LayoutOf(_) => unreachable!("unresolved layout"),
     }
   }
 
@@ -314,6 +331,25 @@ fn impl_tree_name(
       guide.closure_drop.with_children([name]).with_payload(closure_id.0)
     }
     ImplTreeKind::Synthetic(item) => synthetic_impl_name(chart, guide, table, item),
+    ImplTreeKind::Layout(kind, args) => {
+      let (tag, def) = match kind {
+        LayoutKind::Empty => (0u32, None),
+        LayoutKind::Space => (1, None),
+        LayoutKind::Composite => (2, None),
+        LayoutKind::Struct(id) => (3, Some(chart.structs[*id].def)),
+        LayoutKind::Enum(id) => (4, Some(chart.enums[*id].def)),
+        LayoutKind::Union(id) => (5, Some(chart.unions[*id].def)),
+        LayoutKind::Opaque(id) => (6, Some(chart.opaque_types[*id].def)),
+        LayoutKind::Ref => (7, None),
+        LayoutKind::Closure => (8, None),
+        LayoutKind::IfConst(id) => (9, Some(chart.concrete_consts[*id].def)),
+      };
+      let def = def.map(|def| add_name(table, &chart.defs[def].path));
+      guide
+        .layout
+        .with_payload(tag)
+        .with_children(def.into_iter().chain(args.iter().map(|&i| impls[i].name)))
+    }
   }
 }
 

@@ -253,6 +253,7 @@ impl Builtins {
       fn_,
       fork,
       drop,
+      layout,
       duplicate,
       erase,
       index,
@@ -301,6 +302,7 @@ impl Builtins {
     revert_idx(fn_, checkpoint.traits);
     revert_idx(fork, checkpoint.traits);
     revert_idx(drop, checkpoint.traits);
+    revert_idx(layout, checkpoint.traits);
     revert_idx(duplicate, checkpoint.impls);
     revert_idx(erase, checkpoint.impls);
     revert_idx(index, checkpoint.traits);
