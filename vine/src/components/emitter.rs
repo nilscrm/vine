@@ -15,28 +15,17 @@ use crate::{
   features::{debug::insert_main_net_debug, enum_::enum_name, local::LocalEmissionState},
   structures::{
     chart::Chart,
-    resolutions::{ConstRelId, FnRelId, Fragment},
-    specializations::Specializations,
+    resolutions::{ConstRelId, FnRelId},
     template::{Template, TemplateNode},
     tir::Local,
     vir::{Header, Interface, InterfaceKind, Port, PortKind, Stage, StageId, Step, Transfer, Vir},
   },
 };
 
-pub fn emit(
-  debug: bool,
-  chart: &Chart,
-  fragment: &Fragment,
-  vir: &Vir,
-  specs: &mut Specializations,
-  table: &mut Table,
-  guide: &Guide,
-) -> Template {
+pub fn emit(debug: bool, chart: &Chart, vir: &Vir, table: &mut Table, guide: &Guide) -> Template {
   let mut emitter = Emitter {
     chart,
-    fragment,
     vir,
-    specs,
     table,
     guide,
     locals: BTreeMap::new(),
@@ -51,9 +40,7 @@ pub fn emit(
 
 pub(crate) struct Emitter<'a> {
   pub(crate) chart: &'a Chart,
-  pub(crate) fragment: &'a Fragment,
   pub(crate) vir: &'a Vir,
-  pub(crate) specs: &'a mut Specializations,
   pub(crate) table: &'a mut Table,
   pub(crate) guide: &'a Guide,
   pub(crate) locals: BTreeMap<Local, LocalEmissionState>,

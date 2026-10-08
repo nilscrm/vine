@@ -3,7 +3,7 @@
 mod;
 
 use ops::{Cast, Fn};
-use util::{duplicate, forget, unreachable};
+use util::{forget, unreachable};
 
 pub mod Show;
 
@@ -14,15 +14,7 @@ pub const enabled: Bool = debug_state() is Some(_);
 pub fn log[T; Cast[T, String]](msg: T) {
   let msg = msg as String;
   if debug_state() is Some(&state) {
-    let frame = state.stack.top().assume();
-    state.io.print("[{frame.file}:{frame.line}:{frame.col}] {msg}\n")
-  }
-}
-
-#[frameless]
-pub fn backtrace() -> Option[&Stack] {
-  if debug_state() is Some(&state) {
-    Some(&state.stack)
+    state!.print("{msg}\n")
   }
 }
 
@@ -36,10 +28,7 @@ fn panic[T]() -> T {
 pub fn error[M, T; Cast[M, String]](msg: M) -> T {
   let msg = msg as String;
   if debug_state() is Some(&state) {
-    state.io.print("ERROR: {msg}\n");
-    for frame in state.stack {
-      state.io.print("  @ {frame}\n");
-    }
+    state!.print("ERROR: {msg}\n");
   }
   panic()
 }
@@ -94,64 +83,10 @@ pub mod WithState {
   }
 }
 
-struct DebugState({ io: IO, stack: Stack });
+/// The state available in debug mode.
+struct DebugState(IO);
 
 #[builtin = "debug_state"]
 fn debug_state() -> Option[&DebugState] {
   safe unreachable()
-}
-
-pub struct Stack(Lazy[Option[Frame]], Box[Stack]);
-
-pub mod Stack {
-  pub impl : Fork[Stack] = safe duplicate;
-  pub impl : Drop[Stack] {
-    fn drop(self: Stack) {
-      safe forget(self);
-    }
-  }
-
-  use #root::data::Iterator;
-
-  pub fn .top(&Stack(entry, _)) -> Option[Frame] {
-    entry.get()
-  }
-
-  pub impl : Iterator[Stack, Frame] {
-    fn advance(Stack(entry, rest)) -> Option[(Frame, Stack)] {
-      if entry.get() is Some(frame) {
-        Some(frame, rest!)
-      }
-    }
-  }
-}
-
-struct Lazy[T](~Request[T]);
-enum Request[T] {
-  Get(~T),
-}
-
-mod Lazy {
-  pub impl fork[T]: Fork[Lazy[T]] = safe duplicate;
-  pub impl drop[T]: Drop[Lazy[T]] {
-    fn drop(self: Lazy[T]) {
-      safe forget(self);
-    }
-  }
-
-  pub fn .get[T](Lazy[T](~request)) -> T {
-    let value;
-    request = Request::Get(~value);
-    value
-  }
-}
-
-pub struct* Frame(pub { path: List[String], file: String, line: N32, col: N32 });
-
-pub mod Frame {
-  pub impl to_string: Cast[Frame, String] {
-    fn cast(Frame({ path, file, line, col })) -> String {
-      "#{path.join("::")} ({file}:{line}:{col})"
-    }
-  }
 }

@@ -6,7 +6,6 @@ use vine_util::{idx::IdxVec, nat::Nat};
 use crate::{
   compiler::Guide,
   components::synthesizer::{SyntheticImpl, SyntheticItem},
-  features::debug::frame_data,
   structures::{
     chart::{Chart, ConstId, FnId},
     checkpoint::Checkpoint,
@@ -406,7 +405,6 @@ fn synthetic_item_name(
       let name = add_name(table, &chart.defs[chart.fn_def(*fn_id)].path);
       guide.synthetic_call_fn.with_children([name]).with_payload(*params)
     }
-    SyntheticItem::Frame(path, span) => guide.synthetic_frame.with_payload(frame_data(path, *span)),
     SyntheticItem::N32(n) => guide.synthetic_n32.with_payload(*n),
     SyntheticItem::String(str) => guide.synthetic_string.with_payload(Nat::encode_string(str)),
     SyntheticItem::ConstNil => guide.synthetic_const_nil.into(),

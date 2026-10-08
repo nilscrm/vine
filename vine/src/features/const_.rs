@@ -195,11 +195,11 @@ impl Distiller<'_> {
 }
 
 impl Emitter<'_> {
-  pub(crate) fn emit_const(&mut self, span: &Span, rel: &ConstRelId, out: &Port) {
+  pub(crate) fn emit_const(&mut self, _span: &Span, rel: &ConstRelId, out: &Port) {
     let rel = self.emit_const_rel(*rel);
     let out = self.emit_port(out);
     if self.debug {
-      let dbg = self.tap_debug_call(*span);
+      let dbg = self.tap_debug();
       self.net.add(self.guide.dbg, rel, [dbg, out]);
     } else {
       self.net.link(rel, out);

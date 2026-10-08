@@ -164,9 +164,8 @@ impl Compiler {
     let guide = &Guide::build(table);
 
     for fragment_id in self.fragments.keys_from(checkpoint.templates) {
-      let fragment = &self.fragments[fragment_id];
       let vir = &self.vir[fragment_id];
-      let template = emit(self.debug, &self.chart, fragment, vir, &mut self.specs, table, guide);
+      let template = emit(self.debug, &self.chart, vir, table, guide);
       self.templates.push_to(fragment_id, template);
     }
 
@@ -194,17 +193,7 @@ impl Compiler {
           self.templates[*fragment_id].instantiate(table, guide, nets, &self.specs, spec);
         }
         SpecKind::Synthetic(item) => {
-          synthesize(
-            nets,
-            self.debug,
-            &self.files,
-            &self.chart,
-            &self.specs,
-            spec,
-            table,
-            guide,
-            item,
-          );
+          synthesize(nets, self.debug, &self.chart, &self.specs, spec, table, guide, item);
         }
       }
     }
@@ -347,8 +336,6 @@ guide!(pub Guide {
   synthetic_enum_reconstruct: PathId = "vi:synthetic:enum_reconstruct",
   synthetic_const_alias: PathId = "vi:synthetic:const_alias",
   synthetic_call_fn: PathId = "vi:synthetic:call_fn",
-  synthetic_frame: PathId = "vi:synthetic:frame",
-  synthetic_frame_end: NameId = "vi:synthetic:frame_end",
   synthetic_debug_state: PathId = "vi:synthetic:debug_state",
   synthetic_n32: PathId = "vi:synthetic:n32",
   synthetic_string: PathId = "vi:synthetic:string",

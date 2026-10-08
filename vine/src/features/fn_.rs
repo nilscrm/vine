@@ -572,7 +572,7 @@ impl Emitter<'_> {
 
   pub(crate) fn _emit_call(
     &mut self,
-    span: Span,
+    _span: Span,
     rel: FnRelId,
     args: impl IntoIterator<Item = Wire>,
     ret: Wire,
@@ -582,7 +582,7 @@ impl Emitter<'_> {
     args.push(ret);
     let call = self.net.make(self.guide.fn_, args);
     if self.debug {
-      let dbg = self.tap_debug_call(span);
+      let dbg = self.tap_debug();
       self.net.add(self.guide.dbg, func, [dbg, call]);
     } else {
       self.net.link(func, call);

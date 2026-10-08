@@ -12,15 +12,13 @@ use vine_util::idx::{Counter, IdxVec, RangeExt};
 
 use crate::{
   compiler::Guide,
-  components::loader::FileId,
   features::enum_::enum_name,
   structures::{
-    ast::{Ident, Span},
+    ast::Ident,
     chart::{
       Chart, ConcreteConstId, ConstId, EnumId, FnId, OpaqueTypeId, StructId, TraitConstId,
       TraitFnId, VariantId,
     },
-    diag::FileInfo,
     resolutions::{ConstRelId, FnRelId, Rels},
     specializations::{Spec, Specializations},
     tir::TirImpl,
@@ -49,7 +47,6 @@ pub enum SyntheticItem {
   EnumReconstruct(EnumId),
   ConstAlias(ConcreteConstId),
   CallFn(FnId, usize, usize),
-  Frame(String, Span),
   DebugState,
   N32(u32),
   String(String),
@@ -58,7 +55,6 @@ pub enum SyntheticItem {
 
 struct Synthesizer<'a> {
   nets: &'a mut HashMap<NameId, FlatNet>,
-  files: &'a IdxVec<FileId, FileInfo>,
   chart: &'a Chart,
   specs: &'a Specializations,
   spec: &'a Spec,
@@ -72,7 +68,6 @@ struct Synthesizer<'a> {
 pub fn synthesize(
   nets: &mut HashMap<NameId, FlatNet>,
   debug: bool,
-  files: &IdxVec<FileId, FileInfo>,
   chart: &Chart,
   specs: &Specializations,
   spec: &Spec,
@@ -83,7 +78,6 @@ pub fn synthesize(
   Synthesizer {
     nets,
     debug,
-    files,
     chart,
     specs,
     table,
@@ -133,7 +127,6 @@ impl Synthesizer<'_> {
       SyntheticItem::EnumReconstruct(enum_id) => self_.synthesize_enum_reconstruct(enum_id),
       SyntheticItem::ConstAlias(_) => self_.synthesize_const_alias(),
       SyntheticItem::CallFn(_, _, params) => self_.synthesize_call_fn(params),
-      SyntheticItem::Frame(path, span) => self_.synthesize_frame(path, span),
       SyntheticItem::DebugState => self_.synthesize_debug_state(),
       SyntheticItem::N32(n32) => self_.synthesize_n32(n32),
       SyntheticItem::String(string) => self_.synthesize_string(string),
@@ -237,19 +230,6 @@ impl Synthesizer<'_> {
     self.net.free.push(root);
     let fn_ = self.fn_rel(FnRelId(0));
     self.net.link(fn_, call);
-  }
-
-  fn synthesize_frame(&mut self, path: String, span: Span) {
-    let path = self.list(path[1..].split("::").collect::<Vec<_>>(), Self::string);
-    let pos = self.files[span.file].get_pos(span.start);
-    let file = self.string(pos.file);
-    let line = self.net.make(self.guide.n32.with_payload(pos.line as u32 + 1), []);
-    let col = self.net.make(self.guide.n32.with_payload(pos.col as u32 + 1), []);
-    let frame = self.net.make(self.guide.tuple, [col, file, line, path]);
-    let option = self.enum_(self.chart.builtins.option.unwrap(), VariantId(1), frame);
-    let nil = self.net.make(self.guide.tuple, []);
-    self.net.free.push(nil);
-    self.net.free.push(option);
   }
 
   fn synthesize_debug_state(&mut self) {
@@ -440,7 +420,6 @@ impl SyntheticItem {
       | SyntheticItem::EnumVariantNames(_)
       | SyntheticItem::EnumDeconstruct(_)
       | SyntheticItem::EnumReconstruct(_)
-      | SyntheticItem::Frame(..)
       | SyntheticItem::DebugState
       | SyntheticItem::N32(_)
       | SyntheticItem::String(_) => Rels::default(),

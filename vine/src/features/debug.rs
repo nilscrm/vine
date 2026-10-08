@@ -5,56 +5,14 @@ use ivy::{
   net::{FlatNet, Wire},
   translate::Translator,
 };
-use vine_util::nat::Nat;
 
-use crate::{
-  compiler::Guide,
-  components::{emitter::Emitter, synthesizer::SyntheticItem},
-  structures::{
-    ast::Span,
-    specializations::{Spec, SpecKind, SpecRels},
-  },
-};
+use crate::{compiler::Guide, components::emitter::Emitter};
 
 impl Emitter<'_> {
   pub(crate) fn tap_debug(&mut self) -> Wire {
     let dbg_out = self.net.wire();
     let dbg_in = replace(&mut self.debug_state.as_mut().unwrap().0, dbg_out);
     self.net.make(self.guide.ref_, [dbg_in, dbg_out])
-  }
-
-  pub(crate) fn tap_debug_call(&mut self, span: Span) -> Wire {
-    if self.fragment.frameless {
-      return self.tap_debug();
-    }
-    let path = &self.fragment.path;
-    let frame_name = self.guide.synthetic_frame.with_payload(frame_data(path, span));
-    let frame_name = self.table.add_name(frame_name);
-    let frame_name = self.guide.synthetic.with_children([frame_name]);
-    let synthetic_item = SyntheticItem::Frame(path.clone(), span);
-    self.specs.synthetic.entry((synthetic_item, vec![])).or_insert_with_key(|(item, _)| {
-      self.specs.specs.push(Some(Spec {
-        name: frame_name.clone(),
-        rels: SpecRels::default(),
-        kind: SpecKind::Synthetic(item.clone()),
-      }))
-    });
-    let [io_in, stack_in, new_dbg_out, io_out, new_stack_out, frame_out, stack_out, dbg_out] =
-      self.net.wires();
-    let dbg_in = replace(&mut self.debug_state.as_mut().unwrap().0, dbg_out);
-    self.net.add(self.guide.tuple, dbg_in, [io_in, stack_in]);
-    let enum_ = self.table.add_name(self.guide.enum_.with_payload(1u32));
-    let frame_name = self.table.add_name(frame_name);
-    let nil = self.net.make(self.guide.tuple, []);
-    let frame_in = self.net.make(self.guide.enum_match.with_children([enum_, frame_name]), [nil]);
-    let new_stack_in = self.net.make(self.guide.tuple, [frame_in, stack_in]);
-    let new_dbg_in = self.net.make(self.guide.tuple, [io_in, new_stack_in]);
-    let ref_ = self.net.make(self.guide.ref_, [new_dbg_in, new_dbg_out]);
-    self.net.add(self.guide.tuple, new_dbg_out, [io_out, new_stack_out]);
-    self.net.add(self.guide.tuple, new_stack_out, [frame_out, stack_out]);
-    self.net.add(self.guide.eraser, frame_out, []);
-    self.net.add(self.guide.tuple, dbg_out, [io_out, stack_out]);
-    ref_
   }
 
   pub fn with_debug(&mut self, inner: Wire) -> Wire {
@@ -78,16 +36,6 @@ pub(crate) fn insert_main_net_debug(
 ) {
   let guide = Guide::build(table);
 
-  let mut net = <FlatNet>::default();
-  let nil = net.make(guide.tuple, []);
-  let enum_ = table.add_name(guide.enum_.with_payload(1u32));
-  let option = net.make(guide.enum_variant.with_payload(0u32).with_children([enum_]), [nil]);
-  let nil = net.make(guide.tuple, []);
-  net.free.push(nil);
-  net.free.push(option);
-  translator.translate(table, &mut net);
-  nets.insert(guide.synthetic_frame_end, net);
-
   let mut net = FlatNet::default();
   let [io_in, io_out, main_io_in, main_io_out, dbg_io_in, dbg_io_out] = net.wires();
   let free = net.make(guide.tuple, [io_in, io_out]);
@@ -96,19 +44,7 @@ pub(crate) fn insert_main_net_debug(
   net.add(split, io_in, [main_io_in, dbg_io_in]);
   let merge = guide.ext.with_payload(2u32).with_children([guide.io_merge]);
   net.add(merge, main_io_out, [dbg_io_out, io_out]);
-  let dbg_state_ref = {
-    let stack_in = {
-      let enum_ = table.add_name(guide.enum_.with_payload(1u32));
-      let nil = net.make(guide.tuple, []);
-      let end = net.make(guide.enum_match.with_children([enum_, guide.synthetic_frame_end]), [nil]);
-      let eraser = net.make(guide.eraser, []);
-      net.make(guide.tuple, [end, eraser])
-    };
-    let dbg_state_in = net.make(guide.tuple, [dbg_io_in, stack_in]);
-    let stack_out = net.make(guide.eraser, []);
-    let dbg_state_out = net.make(guide.tuple, [dbg_io_out, stack_out]);
-    net.make(guide.ref_, [dbg_state_in, dbg_state_out])
-  };
+  let dbg_state_ref = net.make(guide.ref_, [dbg_io_in, dbg_io_out]);
   let main_io_ref = net.make(guide.ref_, [main_io_in, main_io_out]);
   let main = net.make(guide.graft.with_children([entrypoint]), []);
   let nil = net.make(guide.tuple, []);
@@ -116,8 +52,4 @@ pub(crate) fn insert_main_net_debug(
   net.add(guide.dbg, main, [dbg_state_ref, call]);
   translator.translate(table, &mut net);
   nets.insert(guide.main, net);
-}
-
-pub(crate) fn frame_data(path: &str, span: Span) -> Nat {
-  Nat::encode_tuple([Nat::encode_string(path), Nat::new(vec![span.start as u32, span.end as u32])])
 }
