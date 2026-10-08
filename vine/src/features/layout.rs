@@ -12,11 +12,11 @@
 use crate::structures::{
   ast::Span,
   chart::{Chart, GenericsId},
-  diag::{Diag, Diags},
+  diag::{Diag, Diags, ErrorGuaranteed},
   resolutions::Rels,
   signatures::Signatures,
   tir::{LayoutKind, TirImpl},
-  types::{ImplType, Inverted, Type, TypeKind, Types},
+  types::{ImplType, Type, TypeKind, Types},
 };
 
 pub(crate) struct LayoutResolver<'a> {
@@ -83,17 +83,10 @@ impl<'a> LayoutResolver<'a> {
   }
 
   fn layout_of(&mut self, ty: Type) -> TirImpl {
-    let (inv, kind) = self.types.force_kind(self.diags, ty);
-    let kind = kind.clone();
-    if inv.0 && !self.types.self_inverse(ty) {
-      return TirImpl::Layout(LayoutKind::Space, vec![]);
-    }
-    let inv = if inv.0 { Inverted(true) } else { Inverted(false) };
-    let children = |self_: &mut Self, tys: &[Type]| {
-      tys.iter().map(|&t| self_.layout_of(t.invert_if(inv))).collect::<Vec<_>>()
-    };
-    match kind {
-      TypeKind::Param(index, _) => {
+    // Report any inference failure.
+    self.types.force_kind(self.diags, ty);
+    match shape(self.types, ty) {
+      Shape::Param(index) => {
         match self.params.get(index).copied().flatten() {
           Some(param) => TirImpl::Param(param),
           None => TirImpl::Error(self.diags.error(Diag::LayoutUnavailable {
@@ -102,24 +95,50 @@ impl<'a> LayoutResolver<'a> {
           })),
         }
       }
-      TypeKind::Tuple(tys) => TirImpl::Layout(LayoutKind::Composite, children(self, &tys)),
-      TypeKind::Object(entries) => {
-        let tys = entries.values().copied().collect::<Vec<_>>();
-        TirImpl::Layout(LayoutKind::Composite, children(self, &tys))
+      Shape::Node(kind, tys) => {
+        TirImpl::Layout(kind, tys.into_iter().map(|ty| self.layout_of(ty)).collect())
       }
-      TypeKind::Struct(id, _, tys) => TirImpl::Layout(LayoutKind::Struct(id), children(self, &tys)),
-      TypeKind::Enum(id, tys) => TirImpl::Layout(LayoutKind::Enum(id), children(self, &tys)),
-      TypeKind::Union(id, _, tys) => TirImpl::Layout(LayoutKind::Union(id), children(self, &tys)),
-      TypeKind::Opaque(id, tys) => TirImpl::Layout(LayoutKind::Opaque(id), children(self, &tys)),
-      TypeKind::Ref(ty) => TirImpl::Layout(LayoutKind::Ref, children(self, &[ty])),
-      TypeKind::Closure(..) => TirImpl::Layout(LayoutKind::Closure, vec![]),
-      TypeKind::Fn(_) | TypeKind::Key(_) | TypeKind::Never | TypeKind::Default => {
-        TirImpl::Layout(LayoutKind::Empty, vec![])
-      }
-      TypeKind::IfConst(id, then, else_) => {
-        TirImpl::Layout(LayoutKind::IfConst(id), children(self, &[then, else_]))
-      }
-      TypeKind::Error(err) => TirImpl::Error(err),
+      Shape::Error(err) => TirImpl::Error(err),
     }
+  }
+}
+
+/// The shape of a type's layout: either a type parameter, or a kind of layout
+/// whose children are the layouts of the given types.
+pub(crate) enum Shape {
+  Param(usize),
+  Node(LayoutKind, Vec<Type>),
+  Error(ErrorGuaranteed),
+}
+
+/// Determines the shape of the layout of `ty`.
+///
+/// A space is a single word, so all inverted types have the same layout,
+/// except for those which are their own inverse; these hold no data.
+pub(crate) fn shape(types: &Types, ty: Type) -> Shape {
+  let Some((inv, kind)) = types.kind(ty) else {
+    return Shape::Error(ErrorGuaranteed::new_unchecked());
+  };
+  if inv.0 && !types.self_inverse(ty) {
+    return Shape::Node(LayoutKind::Space, vec![]);
+  }
+  let node = |kind, tys: &[Type]| Shape::Node(kind, tys.iter().map(|t| t.invert_if(inv)).collect());
+  match kind {
+    TypeKind::Param(index, _) => Shape::Param(*index),
+    TypeKind::Tuple(tys) => node(LayoutKind::Composite, tys),
+    TypeKind::Object(entries) => {
+      node(LayoutKind::Composite, &entries.values().copied().collect::<Vec<_>>())
+    }
+    TypeKind::Struct(id, _, tys) => node(LayoutKind::Struct(*id), tys),
+    TypeKind::Enum(id, tys) => node(LayoutKind::Enum(*id), tys),
+    TypeKind::Union(id, _, tys) => node(LayoutKind::Union(*id), tys),
+    TypeKind::Opaque(id, tys) => node(LayoutKind::Opaque(*id), tys),
+    TypeKind::Ref(ty) => node(LayoutKind::Ref, &[*ty]),
+    TypeKind::Closure(..) => node(LayoutKind::Closure, &[]),
+    TypeKind::IfConst(id, then, else_) => node(LayoutKind::IfConst(*id), &[*then, *else_]),
+    TypeKind::Fn(_) | TypeKind::Key(_) | TypeKind::Never | TypeKind::Default => {
+      node(LayoutKind::Empty, &[])
+    }
+    TypeKind::Error(err) => Shape::Error(*err),
   }
 }

@@ -8,6 +8,7 @@ use util::transmute;
 /// ~space = 46;
 /// hole.get() // 46
 /// ```
+#[builtin = "Hole"]
 pub type Hole[T];
 
 pub mod Hole {

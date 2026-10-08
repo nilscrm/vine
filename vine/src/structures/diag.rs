@@ -317,6 +317,8 @@ diags! {
     ["the `#[frameless]` attribute can only be applied to a function"]
   BadIntrinsicAttr
     ["the `#[intrinsic]` attribute can only be applied to a function"]
+  InfiniteSize { ty: String }
+    ["type `{ty}` has infinite size; wrap the recursive part in a `Box`"]
   LayoutUnavailable { ty: String }
     ["cannot determine the layout of `{ty}`"]
   UnknownIntrinsic { name: String }

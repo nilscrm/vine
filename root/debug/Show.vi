@@ -11,7 +11,7 @@ pub trait[T] Show {
 
 pub enum* Show {
   Literal(String),
-  Constructor(String, Show),
+  Constructor(String, Box[Show]),
   Tuple(List_[Show]),
   Object(List_[(Show, Show)]),
   List(List_[Show]),
@@ -31,7 +31,7 @@ pub mod Show {
   fn ._format(self: Show, max_width: N32, indent: N32) -> (N32, String) {
     match self {
       Literal(literal) { (literal.len(), literal) }
-      Constructor(name, data) {
+      Constructor(name, Box(data)) {
         let omit_parens = &data is &Tuple(tuple) and tuple.len() != 1;
         let (width, data) = data._format(max_width, indent);
         if omit_parens {
@@ -171,7 +171,7 @@ pub mod Show {
   #[basic]
   pub impl struct_[S, C; Struct[S, C], Show[C]]: Show[S] {
     fn show(&struct_: &S) -> Show {
-      Show::Constructor(Struct::name[S, C], Show::show(&struct_ as &C))
+      Show::Constructor(Struct::name[S, C], Box(Show::show(&struct_ as &C)))
     }
   }
 
@@ -198,7 +198,7 @@ pub mod Show {
       fn show_variant(&self: &Variant[I, R], variant_names: List_[String]) -> Show {
         let (init_name, rest_names) = variant_names.head_tail().assume();
         match &self {
-          &Variant::Init(init) { Show::Constructor(init_name, init.show()) }
+          &Variant::Init(init) { Show::Constructor(init_name, Box(init.show())) }
           &Variant::Rest(rest) { rest.show_variant(rest_names) }
         }
       }
@@ -207,7 +207,7 @@ pub mod Show {
 
   pub impl ref[T; Show[T]]: Show[&T] {
     fn show(&&value: &&T) -> Show {
-      Show::Constructor("&", value.show())
+      Show::Constructor("&", Box(value.show()))
     }
   }
 

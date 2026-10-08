@@ -216,7 +216,7 @@ pub mod Heap[T; Ord[T]] {
   /// ```
   pub impl [T; Show[T]]: Show[Heap[T]] {
     fn show(&self: &Heap[T]) -> Show {
-      Show::Constructor("Heap", Show::List(self._show()))
+      Show::Constructor("Heap", Box(Show::List(self._show())))
     }
   }
 

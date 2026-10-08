@@ -3,6 +3,7 @@ pub mod charter;
 pub mod distiller;
 pub mod emitter;
 pub mod finder;
+pub mod layouter;
 pub mod lexer;
 pub mod loader;
 pub mod matcher;

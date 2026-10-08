@@ -7,6 +7,7 @@ edition = "2024"
 class = { rev = "99738e6", git = "https://github.com/tjjfvi/class" }
 unicode-id-start = "1.4.0"
 
+frames = { path = "../frames" }
 ivm = { path = "../ivm" }
 ivy = { path = "../ivy" }
 vine-util = { path = "../util" }

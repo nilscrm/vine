@@ -101,7 +101,7 @@ fn debug_state() -> Option[&DebugState] {
   safe unreachable()
 }
 
-pub struct Stack(Lazy[Option[Frame]], Stack);
+pub struct Stack(Lazy[Option[Frame]], Box[Stack]);
 
 pub mod Stack {
   pub impl : Fork[Stack] = safe duplicate;
@@ -116,7 +116,7 @@ pub mod Stack {
   pub impl : Iterator[Stack, Frame] {
     fn advance(Stack(entry, rest)) -> Option[(Frame, Stack)] {
       if entry.get() is Some(frame) {
-        Some(frame, rest)
+        Some(frame, rest!)
       }
     }
   }

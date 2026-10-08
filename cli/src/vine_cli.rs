@@ -328,14 +328,26 @@ pub struct VineBuildCommand {
 pub enum BuildTarget {
   None,
   Ivm,
+  /// The frames runtime; not yet able to emit code, so this only computes and
+  /// prints the layouts the program uses.
+  Frames,
 }
 
 impl VineBuildCommand {
   pub fn execute(self) -> Result<()> {
-    let (ref mut table, mut nets, _) = self.compile.compile();
+    let (ref mut table, mut nets, mut compiler) = self.compile.compile();
     let target = match self.target {
       BuildTarget::None => Target::None,
       BuildTarget::Ivm => Target::Ivm,
+      BuildTarget::Frames => {
+        let result = compiler.frame_layouts();
+        eprint_diags(&compiler);
+        let Ok(layouts) = result else { exit(1) };
+        for (id, layout) in layouts.layouts.iter() {
+          println!("{id:?}: {layout:?}");
+        }
+        return Ok(());
+      }
     };
     backend(table, &self.optimizations.into_config(target, None), &mut nets);
     let nets = if self.flat {

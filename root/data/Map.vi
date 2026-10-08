@@ -217,7 +217,7 @@ pub mod Map[K, V; Ord[K]] {
       for &(key, value) in &self {
         entries.push_back((key.show(), value.show()));
       }
-      Show::Constructor("Map", Show::Object(entries))
+      Show::Constructor("Map", Box(Show::Object(entries)))
     }
   }
 

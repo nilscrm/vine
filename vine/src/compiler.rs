@@ -1,5 +1,7 @@
 use std::{collections::HashMap, fmt, mem::take};
 
+use frames::layout::Layouts;
+
 use ivy::{
   guide,
   name::{FromTable, NameId, Table},
@@ -15,6 +17,7 @@ use crate::{
     distiller::Distiller,
     emitter::{emit, insert_main_net},
     finder::FinderCache,
+    layouter::Layouter,
     loader::{FileId, Module},
     normalizer::normalize,
     resolver::Resolver,
@@ -30,7 +33,7 @@ use crate::{
     diag::{Diag, Diags, ErrorGuaranteed, FileInfo},
     resolutions::{Fragment, FragmentId, Resolutions},
     signatures::Signatures,
-    specializations::{SpecKind, Specializations},
+    specializations::{ImplTreeKind, SpecKind, Specializations},
     template::Template,
     vir::Vir,
   },
@@ -210,6 +213,20 @@ impl Compiler {
     if cfg!(debug_assertions) {
       FlatNet::assert_valid(nets, table);
     }
+  }
+
+  /// Computes the layout of every value whose layout the program's
+  /// specializations depend on, for the frames runtime.
+  pub fn frame_layouts(&mut self) -> Result<Layouts, ErrorGuaranteed> {
+    let mut layouter = Layouter::new(&self.chart, &self.sigs, &self.specs, &mut self.diags);
+    for (id, tree) in self.specs.impls.iter() {
+      if let ImplTreeKind::Layout(..) = tree.kind {
+        _ = layouter.impl_tree_layout(id);
+      }
+    }
+    let layouts = layouter.layouts;
+    self.diags.bail()?;
+    Ok(layouts)
   }
 
   pub fn entrypoint_name(&mut self, table: &mut Table, entrypoint: FragmentId) -> NameId {
