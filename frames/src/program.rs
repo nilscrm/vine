@@ -2,8 +2,6 @@ use std::fmt;
 
 use vine_util::{idx::IdxVec, new_idx};
 
-use crate::layout::{LayoutId, Layouts};
-
 new_idx!(pub BlockId; n => ["b{n}"]);
 new_idx!(pub OpId; n => ["op{n}"]);
 
@@ -38,7 +36,6 @@ impl fmt::Debug for Label {
 #[derive(Debug, Default, Clone)]
 pub struct Program {
   pub blocks: IdxVec<BlockId, Block>,
-  pub layouts: Layouts,
   /// The primitive operations used by the program, by name; see
   /// [`Ops`](crate::ops::Ops).
   pub ops: IdxVec<OpId, &'static str>,
@@ -126,17 +123,6 @@ pub enum Instr {
     offset: u32,
     src: Reg,
     len: u32,
-  },
-  /// Deeply copies a value.
-  Copy {
-    dst: Reg,
-    src: Reg,
-    layout: LayoutId,
-  },
-  /// Deeply frees a value.
-  Erase {
-    src: Reg,
-    layout: LayoutId,
   },
 
   /// Allocates a frame for `block`; none of its slots are filled.

@@ -33,6 +33,7 @@ intrinsics! {
   Transmute = "transmute",
   BlackBox = "black_box",
   Erase = "erase",
+  Forget = "forget",
   Unreachable = "unreachable",
   Panic = "panic",
 

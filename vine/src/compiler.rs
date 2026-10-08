@@ -1,7 +1,5 @@
 use std::{collections::HashMap, fmt, mem::take};
 
-use frames::layout::Layouts;
-
 use ivy::{
   guide,
   name::{FromTable, NameId, Table},
@@ -17,7 +15,7 @@ use crate::{
     distiller::Distiller,
     emitter::{emit, insert_main_net},
     finder::FinderCache,
-    layouter::Layouter,
+    layouter::{Layout, Layouter},
     loader::{FileId, Module},
     normalizer::normalize,
     resolver::Resolver,
@@ -31,6 +29,7 @@ use crate::{
     chart::{Chart, VisId},
     checkpoint::Checkpoint,
     diag::{Diag, Diags, ErrorGuaranteed, FileInfo},
+    intrinsics::Intrinsic,
     resolutions::{Fragment, FragmentId, Resolutions},
     signatures::Signatures,
     specializations::{ImplTreeKind, SpecKind, Specializations},
@@ -217,14 +216,40 @@ impl Compiler {
 
   /// Computes the layout of every value whose layout the program's
   /// specializations depend on, for the frames runtime.
-  pub fn frame_layouts(&mut self) -> Result<Layouts, ErrorGuaranteed> {
+  /// Computes the layouts the program's specializations depend on, for the
+  /// frames runtime, returning each as the type it describes.
+  pub fn frame_layouts(&mut self) -> Result<Vec<(String, Layout)>, ErrorGuaranteed> {
     let mut layouter = Layouter::new(&self.chart, &self.sigs, &self.specs, &mut self.diags);
+    let mut layouts = Vec::new();
     for (id, tree) in self.specs.impls.iter() {
-      if let ImplTreeKind::Layout(..) = tree.kind {
-        _ = layouter.impl_tree_layout(id);
+      if let ImplTreeKind::Layout(..) = tree.kind
+        && let Ok(term) = layouter.impl_tree_term(id)
+        && let Ok(layout) = layouter.term_layout(term.clone())
+      {
+        layouts.push((layouter.show_term(&term), layout));
       }
     }
-    let layouts = layouter.layouts;
+
+    // `duplicate` and `erase` copy and drop values by copying and dropping
+    // their words, which is only valid for plain data.
+    for (fn_id, fn_def) in self.chart.concrete_fns.iter() {
+      let intrinsic = match fn_def.intrinsic {
+        Some(Intrinsic::Duplicate) => "duplicate",
+        Some(Intrinsic::Erase) => "erase",
+        _ => continue,
+      };
+      let Some(specs) = self.specs.lookup.get(self.resolutions.fns[fn_id]) else { continue };
+      for args in specs.keys() {
+        if let Ok(term) = layouter.impl_tree_term(args[0])
+          && let Ok(layout) = layouter.term_layout(term.clone())
+          && !layout.plain
+        {
+          let ty = layouter.show_term(&term);
+          layouter.diags.error(Diag::NotPlainData { span: fn_def.span, intrinsic, ty });
+        }
+      }
+    }
+
     self.diags.bail()?;
     Ok(layouts)
   }

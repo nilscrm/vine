@@ -50,7 +50,7 @@ pub mod Ext {
     }
 
     fn decode(nil: Ext[()]) {
-      safe util::erase(nil);
+      safe util::forget(nil);
     }
   }
 
@@ -60,7 +60,7 @@ pub mod Ext {
     }
 
     fn decode(nil: Ext[{}]) -> {} {
-      safe util::erase(nil);
+      safe util::forget(nil);
       {}
     }
   }

@@ -55,6 +55,13 @@ pub unsafe impl erase[T]: Drop[T] {
   }
 }
 
+/// Abandons `value`, without running any `Drop` implementations, and without
+/// freeing it; e.g. just before aborting the program.
+#[intrinsic = "forget"]
+pub unsafe fn forget[T](value: T) {
+  $ivy { ${value} = vi:eraser }
+}
+
 /// Marks code that can never be reached; reaching it is undefined behavior.
 #[intrinsic = "unreachable"]
 pub unsafe fn unreachable[T]() -> T {

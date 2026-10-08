@@ -1,5 +1,4 @@
 use frames::{
-  layout::{Field, Layout},
   ops::Ops,
   program::{Block, BlockId, Instr, Instr::*, IoOp, Label, Program, Reg},
   runtime::{Host, Runtime, RuntimeError},
@@ -216,58 +215,6 @@ fn hole_take() {
   ];
   program.entry = program.blocks.push(block("entry", 0, 0, 10, code));
   assert_eq!(run(&program), Ok(("0ab".into(), 0)));
-}
-
-#[test]
-fn copy_and_free() {
-  // enum List { Nil, Cons(N32, List) }, boxed:
-  //   List = 1 word, a pointer to [tag, head, tail]
-  let mut program = Program::default();
-  let node = program.layouts.reserve();
-  let nil = program.layouts.add(Layout::EMPTY);
-  let cons =
-    program.layouts.add(Layout { size: 2, fields: vec![Field::Box { offset: 1, layout: node }] });
-  program.layouts.define(
-    node,
-    Layout { size: 3, fields: vec![Field::Enum { offset: 0, variants: vec![nil, cons] }] },
-  );
-  let list =
-    program.layouts.add(Layout { size: 1, fields: vec![Field::Box { offset: 0, layout: node }] });
-
-  // Builds [1, 2] in r0, copies it to r1, and frees both.
-  let mut code = vec![
-    Alloc { dst: r(0), len: 3 },
-    Const { dst: r(9), value: 0 },
-    Store { ptr: r(0), offset: 0, src: r(9), len: 1 },
-  ];
-  for value in [2, 1] {
-    code.extend([
-      Alloc { dst: r(2), len: 3 },
-      Const { dst: r(9), value: 1 },
-      Store { ptr: r(2), offset: 0, src: r(9), len: 1 },
-      Const { dst: r(9), value },
-      Store { ptr: r(2), offset: 1, src: r(9), len: 1 },
-      Store { ptr: r(2), offset: 2, src: r(0), len: 1 },
-      Move { dst: r(0), src: r(2), len: 1 },
-    ]);
-  }
-  code.extend([
-    Copy { dst: r(1), src: r(0), layout: list },
-    // Free the original; the copy must be intact.
-    Erase { src: r(0), layout: list },
-    // Print the copy's second element: r1 -> [1, 1, p]; p -> [1, 2, _]
-    Load { dst: r(3), ptr: r(1), offset: 2, len: 1 },
-    Load { dst: r(4), ptr: r(3), offset: 1, len: 1 },
-    Const { dst: r(5), value: b'0' as u64 },
-    Op { op: program.op("n32:add"), args: vec![r(4), r(5)], rets: vec![r(4)] },
-    Const { dst: r(5), value: 0 },
-    print(r(5), r(4)),
-    Erase { src: r(1), layout: list },
-    Halt,
-    End,
-  ]);
-  program.entry = program.blocks.push(block("entry", 0, 0, 10, code));
-  assert_eq!(run(&program), Ok(("2".into(), 0)));
 }
 
 #[test]

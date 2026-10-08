@@ -343,8 +343,8 @@ impl VineBuildCommand {
         let result = compiler.frame_layouts();
         eprint_diags(&compiler);
         let Ok(layouts) = result else { exit(1) };
-        for (id, layout) in layouts.layouts.iter() {
-          println!("{id:?}: {layout:?}");
+        for (ty, layout) in layouts {
+          println!("{ty}: {} words{}", layout.size, if layout.plain { ", plain" } else { "" });
         }
         return Ok(());
       }

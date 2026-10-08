@@ -9,7 +9,6 @@ use vine_util::idx::IdxVec;
 
 use crate::{
   heap::{Addr, Heap},
-  layout::{Field, LayoutId},
   ops::{Op, Ops},
   program::{BlockId, Instr, IoOp, OpId, Program, Reg},
 };
@@ -36,11 +35,6 @@ pub enum RuntimeError {
   Deadlock {
     waiting: u64,
   },
-  /// A value that cannot be copied or freed generically was copied or freed.
-  Opaque {
-    action: &'static str,
-    what: &'static str,
-  },
   /// A hole was read twice.
   HoleMisuse,
   Io(String),
@@ -55,7 +49,6 @@ impl fmt::Display for RuntimeError {
       RuntimeError::Deadlock { waiting } => {
         write!(f, "deadlock: the program stopped with {waiting} objects still live")
       }
-      RuntimeError::Opaque { action, what } => write!(f, "cannot {action} {what}"),
       RuntimeError::HoleMisuse => write!(f, "hole read more than once"),
       RuntimeError::Io(err) => write!(f, "io error: {err}"),
     }
@@ -224,13 +217,6 @@ impl<'p, 'h> Runtime<'p, 'h> {
           let src = &self.regs[src.0 as usize..][..*len as usize];
           self.heap.slice_mut(addr, *len).copy_from_slice(src);
         }
-        Instr::Copy { dst, src, layout } => {
-          let size = program.layouts.layouts[*layout].size as usize;
-          let src = src.0 as usize;
-          self.regs.copy_within(src..src + size, dst.0 as usize);
-          self.deep_copy(Loc::Reg(*dst), *layout)?;
-        }
-        Instr::Erase { src, layout } => self.deep_free(Loc::Reg(*src), *layout)?,
 
         Instr::NewFrame { dst, block } => self.regs[dst.0 as usize] = self.new_frame(*block).0,
         Instr::Fill { frame, offset, src, len } => {
@@ -362,98 +348,6 @@ impl<'p, 'h> Runtime<'p, 'h> {
       IoOp::Ready => vec![1, io],
     })
   }
-
-  fn deep_copy(&mut self, loc: Loc, layout: LayoutId) -> Result<(), RuntimeError> {
-    let layouts = &self.program.layouts.layouts;
-    let mut stack = vec![(loc, layout)];
-    while let Some((loc, layout)) = stack.pop() {
-      for field in &layouts[layout].fields {
-        match field {
-          Field::Box { offset, layout } => {
-            let size = layouts[*layout].size;
-            let old = Addr(self.read(loc.offset(*offset)));
-            let new = self.heap.alloc(size);
-            let words = self.heap.slice(old, size).to_vec();
-            self.heap.slice_mut(new, size).copy_from_slice(&words);
-            self.write(loc.offset(*offset), new.0);
-            stack.push((Loc::Heap(new), *layout));
-          }
-          Field::Enum { offset, variants } => {
-            let tag = self.read(loc.offset(*offset));
-            stack.push((loc.offset(offset + 1), variants[tag as usize]));
-          }
-          Field::Inline { offset, layout } => stack.push((loc.offset(*offset), *layout)),
-          Field::Opaque { what, .. } => Err(RuntimeError::Opaque { action: "copy", what })?,
-        }
-      }
-    }
-    Ok(())
-  }
-
-  fn deep_free(&mut self, loc: Loc, layout: LayoutId) -> Result<(), RuntimeError> {
-    let layouts = &self.program.layouts.layouts;
-    let mut stack = vec![Free::Value(loc, layout)];
-    while let Some(item) = stack.pop() {
-      let (loc, layout) = match item {
-        Free::Value(loc, layout) => (loc, layout),
-        Free::Object(addr, size) => {
-          self.heap.free(addr, size);
-          continue;
-        }
-      };
-      for field in &layouts[layout].fields {
-        match field {
-          Field::Box { offset, layout } => {
-            let addr = Addr(self.read(loc.offset(*offset)));
-            stack.push(Free::Object(addr, layouts[*layout].size));
-            stack.push(Free::Value(Loc::Heap(addr), *layout));
-          }
-          Field::Enum { offset, variants } => {
-            let tag = self.read(loc.offset(*offset));
-            stack.push(Free::Value(loc.offset(offset + 1), variants[tag as usize]));
-          }
-          Field::Inline { offset, layout } => stack.push(Free::Value(loc.offset(*offset), *layout)),
-          Field::Opaque { what, .. } => Err(RuntimeError::Opaque { action: "free", what })?,
-        }
-      }
-    }
-    Ok(())
-  }
-
-  fn read(&self, loc: Loc) -> u64 {
-    match loc {
-      Loc::Reg(reg) => self.regs[reg.0 as usize],
-      Loc::Heap(addr) => self.heap.get(addr),
-    }
-  }
-
-  fn write(&mut self, loc: Loc, word: u64) {
-    match loc {
-      Loc::Reg(reg) => self.regs[reg.0 as usize] = word,
-      Loc::Heap(addr) => self.heap.set(addr, word),
-    }
-  }
-}
-
-/// The location of a word, either in a register or in the heap.
-#[derive(Debug, Clone, Copy)]
-enum Loc {
-  Reg(Reg),
-  Heap(Addr),
-}
-
-impl Loc {
-  fn offset(self, offset: u32) -> Loc {
-    match self {
-      Loc::Reg(reg) => Loc::Reg(reg.offset(offset)),
-      Loc::Heap(addr) => Loc::Heap(addr.offset(offset)),
-    }
-  }
-}
-
-enum Free {
-  Value(Loc, LayoutId),
-  Object(Addr, u32),
 }
 
 fn encode_space(frame: Addr, offset: u32) -> u64 {

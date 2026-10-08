@@ -3,7 +3,7 @@
 mod;
 
 use ops::{Cast, Fn};
-use util::{duplicate, erase, unreachable};
+use util::{duplicate, forget, unreachable};
 
 pub mod Show;
 
@@ -46,7 +46,7 @@ pub fn error[M, T; Cast[M, String]](msg: M) -> T {
 
 #[frameless]
 pub fn error_with[M, T, U; Cast[M, String]](msg: M, ctx: T) -> U {
-  safe erase(ctx);
+  safe forget(ctx);
   debug::error(msg)
 }
 
@@ -105,7 +105,11 @@ pub struct Stack(Lazy[Option[Frame]], Box[Stack]);
 
 pub mod Stack {
   pub impl : Fork[Stack] = safe duplicate;
-  pub impl : Drop[Stack] = safe erase;
+  pub impl : Drop[Stack] {
+    fn drop(self: Stack) {
+      safe forget(self);
+    }
+  }
 
   use #root::data::Iterator;
 
@@ -129,7 +133,11 @@ enum Request[T] {
 
 mod Lazy {
   pub impl fork[T]: Fork[Lazy[T]] = safe duplicate;
-  pub impl drop[T]: Drop[Lazy[T]] = safe erase;
+  pub impl drop[T]: Drop[Lazy[T]] {
+    fn drop(self: Lazy[T]) {
+      safe forget(self);
+    }
+  }
 
   pub fn .get[T](Lazy[T](~request)) -> T {
     let value;
@@ -138,12 +146,9 @@ mod Lazy {
   }
 }
 
-pub struct Frame(pub { path: List[String], file: String, line: N32, col: N32 });
+pub struct* Frame(pub { path: List[String], file: String, line: N32, col: N32 });
 
 pub mod Frame {
-  pub impl : Fork[Frame] = safe duplicate;
-  pub impl : Drop[Frame] = safe erase;
-
   pub impl to_string: Cast[Frame, String] {
     fn cast(Frame({ path, file, line, col })) -> String {
       "#{path.join("::")} ({file}:{line}:{col})"

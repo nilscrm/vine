@@ -1,7 +1,6 @@
 
 use data::{Hole, Iterator::{Iterator, Collect, Iterate}};
 use ops::{Cast, Concat, Range::{Range, Bound}};
-use util::erase;
 
 /// A linear collection of `T`.
 ///
@@ -300,7 +299,8 @@ pub mod List {
     if list.len() > 1 {
       let len = list.len();
       let sorted = list.sort_prefix(len);
-      safe erase(list);
+      let List(_, front, back) = list;
+      safe Stream::close(front, back);
       list = sorted;
     }
   }

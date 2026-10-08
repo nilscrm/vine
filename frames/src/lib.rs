@@ -26,13 +26,10 @@
 //! forwarding the value into another space. A hole's header counts the code
 //! as one more unfilled slot.
 //!
-//! Values are stored inline, using as many words as their layout requires.
-//! Deep copies and frees of heap data are described by [`Layout`]s.
-//!
-//! [`Layout`]: layout::Layout
+//! Values are stored inline, using as many words as their type's layout
+//! requires; the runtime itself does not know about types or layouts.
 
 pub mod heap;
-pub mod layout;
 pub mod ops;
 pub mod program;
 pub mod runtime;
