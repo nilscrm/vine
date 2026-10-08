@@ -75,13 +75,11 @@ pub mod Array {
   /// array // Array([1, 2, 3])
   /// ```
   pub fn from_fn[T, F*; fn F() -> T](len: N32, f: F) -> Array[T] {
-    if len == 0 {
-      Array::empty
-    } else {
-      let node;
-      Array::for_each(Array(len, ~node), fn* (~t) { t = f(); });
-      Array(len, node)
+    let array = Array::empty;
+    for _ in 0..len {
+      array.push_back(f());
     }
+    array
   }
 
   /// Iterate over the values of the array in order.
@@ -101,18 +99,14 @@ pub mod Array {
   /// });
   /// str // "f(f(f(initial, 1), 2), 3)"
   /// ```
-  pub fn .fold_front[T, U, F*; fn F(U, T) -> U](Array[T](len, node), initial: U, f: F) -> U {
-    if len == 0 {
-      safe node.null;
-      initial
-    } else {
-      let final;
-      let loop values;
-      Node::push_back(len, &~values, ~final);
-      values = Node::zip_with(len, values, safe node.data, f);
-      Node::push_front(len, &values, initial);
-      final
+  pub fn .fold_front[T, U, F*; fn F(U, T) -> U](self: Array[T], initial: U, f: F) -> U {
+    let acc = initial;
+    while self.pop_front() is Some(value) {
+      acc = f(acc, value);
     }
+    let Array(_, node) = self;
+    safe node.null;
+    acc
   }
 
   /// Fold over the array, starting from the back.
@@ -123,18 +117,14 @@ pub mod Array {
   /// });
   /// str // "f(1, f(2, f(3, initial)))"
   /// ```
-  pub fn .fold_back[T, U, F*; fn F(U, T) -> U](Array[T](len, node), initial: U, f: F) -> U {
-    if len == 0 {
-      safe node.null;
-      initial
-    } else {
-      let final;
-      let loop values;
-      Node::push_front(len, &~values, ~final);
-      values = Node::zip_with(len, values, safe node.data, f);
-      Node::push_back(len, &values, initial);
-      final
+  pub fn .fold_back[T, U, F*; fn F(U, T) -> U](self: Array[T], initial: U, f: F) -> U {
+    let acc = initial;
+    while self.pop_back() is Some(value) {
+      acc = f(acc, value);
     }
+    let Array(_, node) = self;
+    safe node.null;
+    acc
   }
 
   pub fn .reduce_unordered[T, F*; fn F(T, T) -> T](Array[T](len, node), f: F) -> Option[T] {
@@ -232,9 +222,8 @@ pub mod Array {
         Some(value)
       }
       _ {
+        let value = Node::pop_back(len, safe &node.data);
         len -= 1;
-        let value;
-        Node::push_back(len, safe &~node.data, ~value);
         Some(value)
       }
     }
@@ -256,9 +245,8 @@ pub mod Array {
         Some(value)
       }
       _ {
+        let value = Node::pop_front(len, safe &node.data);
         len -= 1;
-        let value;
-        Node::push_front(len, safe &~node.data, ~value);
         Some(value)
       }
     }
@@ -433,7 +421,6 @@ pub mod Array {
 ///   ))),
 /// )
 /// ```
-#[self_dual]
 unsafe enum Node[T] {
   leaf(T),
   branch(Box[(Node[T], Node[T])]),
@@ -499,14 +486,15 @@ mod Node {
     T, U, V, F+;
     fn F(T) -> (U, V)
   ](len: N32, x: Node[T], f: F) -> (Node[U], Node[V]) {
-    let f = fn+ (~u, ~v) {
-      let loop t;
-      (u, v) = f(t);
-      ~t
-    };
-    let (y, z);
-    ~Node::zip_with(len, ~y, ~z, f) = x;
-    (y, z)
+    if len == 1 {
+      let (u, v) = f(safe x.leaf);
+      (safe Node::leaf(u), safe Node::leaf(v))
+    } else {
+      let safe Node::branch(Box(xl, xr)) = x;
+      let (ul, vl) = unzip_with((len + 1) / 2, xl, f);
+      let (ur, vr) = unzip_with(len / 2, xr, f);
+      (safe Node::branch(Box(ul, ur)), safe Node::branch(Box(vl, vr)))
+    }
   }
 
   pub fn eq[T; Eq[T]](len: N32, &self: &Node[T], &other: &Node[T]) -> Bool {
@@ -555,6 +543,35 @@ mod Node {
       let safe &Node::branch(Box(left, right)) = &node;
       let &half = if len % 2 == 0 { &left } else { &right };
       Node::push_back(len / 2, &half, value)
+    }
+  }
+
+  /// Removes the first value of a node of length `len`, which must be at
+  /// least `2`; the inverse of `push_front`.
+  pub fn pop_front[T](len: N32, &node: &Node[T]) -> T {
+    if len == 2 {
+      let safe Node::branch(Box(first, rest)) = node;
+      node = rest;
+      safe first.leaf
+    } else {
+      let safe &Node::branch(Box(left, right)) = &node;
+      let value = Node::pop_front((len - 1) / 2 + 1, &left);
+      swap(&left, &right);
+      value
+    }
+  }
+
+  /// Removes the last value of a node of length `len`, which must be at least
+  /// `2`; the inverse of `push_back`.
+  pub fn pop_back[T](len: N32, &node: &Node[T]) -> T {
+    if len == 2 {
+      let safe Node::branch(Box(rest, last)) = node;
+      node = rest;
+      safe last.leaf
+    } else {
+      let safe &Node::branch(Box(left, right)) = &node;
+      let &half = if (len - 1) % 2 == 0 { &left } else { &right };
+      Node::pop_back((len - 1) / 2 + 1, &half)
     }
   }
 }

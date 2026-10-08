@@ -10,5 +10,4 @@
 /// b! // 46
 /// ```
 #[builtin = "Box"]
-#[self_dual]
 pub struct* Box[T](pub T);
