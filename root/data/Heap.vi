@@ -1,7 +1,6 @@
 
 use logical::Nullable;
 use ops::{Cast, Concat, comparison::Ord};
-use util::{duplicate, erase};
 use data::Iterator::{Iterator, Iterate};
 
 /// A min-heap, which provides efficient access to the smallest value in the heap.
@@ -113,7 +112,6 @@ pub mod Heap[T; Ord[T]] {
     }
   }
 
-  #[safe become(duplicate)]
   pub impl [T+]: Fork[Heap[T]] {
     fn fork(&Heap[T](rank, node)) -> Heap[T] {
       if rank == 0 {
@@ -125,7 +123,6 @@ pub mod Heap[T; Ord[T]] {
     }
   }
 
-  #[safe become(erase)]
   pub impl [T?]: Drop[Heap[T]] {
     fn drop(Heap[T](rank, node)) {
       if rank == 0 {

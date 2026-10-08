@@ -20,10 +20,10 @@ use crate::{
     },
     content::{Content, Indent, Keyword, Punct, Space},
     diag::{Diag, ErrorGuaranteed},
-    resolutions::{Become, ResolvedImpl, ResolvedImplKind},
+    resolutions::{ResolvedImpl, ResolvedImplKind},
     signatures::ImplSig,
     tir::TirImpl,
-    types::{ImplType, Type, TypeCtx, TypeKind, Types},
+    types::{ImplType, Type, TypeCtx, TypeKind},
   },
   tools::fmt::Formatter,
 };
@@ -138,7 +138,6 @@ impl Charter<'_> {
       kind,
       manual: false,
       basic: false,
-      become_: None,
       vis,
       unsafe_: false,
     });
@@ -278,7 +277,6 @@ impl Charter<'_> {
       kind: ImplDefKind::Derive(kind, ty),
       manual: false,
       basic: false,
-      become_: None,
       vis,
       unsafe_: false,
     });
@@ -423,128 +421,11 @@ impl Resolver<'_> {
           LayoutResolver::new(self.chart, self.sigs, self.diags, &mut self.types, generics, span)
             .resolve_impl(impl_);
         }
-        Ok(ResolvedImpl { kind, trait_id: *trait_id, become_: Become::Unresolved })
+        Ok(ResolvedImpl { kind, trait_id: *trait_id })
       }
       ImplType::Error(err) => Err(*err),
     };
     self.resolutions.impls.push_to(impl_id, resolved);
-  }
-
-  pub(crate) fn resolve_impl_become(&mut self, impl_id: ImplId) -> Become {
-    let impl_def = &self.chart.impls[impl_id];
-    let Ok(resolved) = &mut self.resolutions.impls[impl_id] else { return Become::Resolved(None) };
-    let Become::Unresolved = resolved.become_ else { return resolved.become_.clone() };
-    resolved.become_ = Become::Resolving;
-    let trait_id = resolved.trait_id;
-    let become_ = match self._resolve_impl_become(impl_id, trait_id, impl_def) {
-      Ok(become_) => Become::Resolved(become_.map(|(target, indices)| {
-        let args = self.become_args(impl_id, target);
-        (target, indices, args)
-      })),
-      Err(diag) => {
-        self.diags.error(diag);
-        Become::Resolved(None)
-      }
-    };
-    let Ok(resolved) = &mut self.resolutions.impls[impl_id] else { return Become::Resolved(None) };
-    resolved.become_ = become_.clone();
-    become_
-  }
-
-  fn _resolve_impl_become(
-    &mut self,
-    impl_id: ImplId,
-    trait_id: TraitId,
-    impl_def: &ImplDef,
-  ) -> Result<Option<(ImplId, Vec<usize>)>, Diag> {
-    let necessary_params = self.sigs.impl_params[impl_def.generics]
-      .types
-      .inner
-      .iter()
-      .enumerate()
-      .filter_map(|(i, x)| matches!(x, ImplType::Trait(t, _) if t == &trait_id).then_some(i))
-      .collect();
-    Ok(match &impl_def.become_ {
-      Some(become_path) => {
-        if let Some(args) = &become_path.generics {
-          Err(Diag::GenericBecomeAttr { span: args.span })?
-        }
-        let DefImplKind::Impl(become_id) =
-          self.resolve_path_impl(impl_def.def, become_path, trait_id)?;
-        if self.resolutions.impls[become_id].as_ref().map_err(|&e| e)?.trait_id != trait_id {
-          Err(Diag::BecomeOtherTrait { span: become_path.span })?
-        }
-        let become_generics = self.chart.impls[become_id].generics;
-        if self.sigs.impl_params[become_generics].types.inner.iter().any(|ty| !self.is_layout(ty)) {
-          Err(Diag::BecomeGenericImpl { span: become_path.span })?
-        }
-        Some((become_id, necessary_params))
-      }
-      None => match &self.resolutions.impls[impl_id].as_ref().unwrap().kind {
-        ResolvedImplKind::Direct { .. } => self.sigs.impl_params[impl_def.generics]
-          .types
-          .inner
-          .iter()
-          .all(|ty| self.is_layout(ty))
-          .then_some((impl_id, Vec::new())),
-        ResolvedImplKind::Indirect(impl_) => {
-          self.resolve_tir_impl_become(&impl_.clone(), None).map(|id| (id, necessary_params))
-        }
-      },
-    })
-  }
-
-  /// Computes the implementation arguments for `target`, which `impl_id`
-  /// becomes; these can only be layouts, which are determined by the type
-  /// `impl_id` implements its trait for.
-  fn become_args(&mut self, impl_id: ImplId, target: ImplId) -> Vec<TirImpl> {
-    let impl_def = &self.chart.impls[impl_id];
-    let target_generics = self.chart.impls[target].generics;
-    let mut types = Types::default();
-    let type_params =
-      types.new_vars(impl_def.span, self.sigs.type_params[target_generics].params.len());
-    let target_ty = types.import(&self.sigs.impls[target], Some(&type_params)).ty;
-    let impl_ty = types.import(&self.sigs.impls[impl_id], None).ty;
-    _ = types.unify_impl_type(&target_ty, &impl_ty);
-    let queries = types.import(&self.sigs.impl_params[target_generics].types, Some(&type_params));
-    let mut args = queries
-      .into_iter()
-      .map(|query| match query {
-        ImplType::Trait(_, tys) => TirImpl::LayoutOf(tys[0]),
-        ImplType::Error(err) => TirImpl::Error(err),
-      })
-      .collect::<Vec<_>>();
-    let mut layouts = LayoutResolver::new(
-      self.chart,
-      self.sigs,
-      self.diags,
-      &mut types,
-      impl_def.generics,
-      impl_def.span,
-    );
-    for arg in &mut args {
-      layouts.resolve_impl(arg);
-    }
-    args
-  }
-
-  fn resolve_tir_impl_become(
-    &mut self,
-    impl_: &TirImpl,
-    fallback: Option<ImplId>,
-  ) -> Option<ImplId> {
-    match impl_ {
-      TirImpl::Def(impl_id, args) => match self.resolve_impl_become(*impl_id) {
-        Become::Resolved(Some((impl_id, indices, _))) => indices
-          .into_iter()
-          .all(|i| self.resolve_tir_impl_become(&args[i], Some(impl_id)) == Some(impl_id))
-          .then_some(impl_id),
-        Become::Resolving => fallback,
-        _ => None,
-      },
-      TirImpl::Param(_) => fallback,
-      _ => None,
-    }
   }
 
   fn resolve_impl_subitem_fn(

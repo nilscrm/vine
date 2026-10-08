@@ -179,7 +179,6 @@ pub enum AttrKind {
   Builtin(String),
   Manual,
   Basic,
-  Become(Path),
   Frameless,
   Configurable,
   Test,

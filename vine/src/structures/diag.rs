@@ -287,16 +287,6 @@ diags! {
     ["the `#[manual]` attribute can only be applied to an impl"]
   BadBasicAttr
     ["the `#[basic]` attribute can only be applied to an impl"]
-  BadBecomeAttr
-    ["the `#[become]` attribute can only be applied to an impl"]
-  DuplicateBecomeAttr
-    ["the `#[become]` attribute can only be applied to an impl once"]
-  GenericBecomeAttr
-    ["generic arguments cannot be supplied here"]
-  BecomeOtherTrait
-    ["can only `#[become]` an impl of the same trait"]
-  BecomeGenericImpl
-    ["can only `#[become]` an impl with no impl parameters"]
   InvalidCommand
     ["invalid command; type `/help` for a list of commands"]
   MissingElse

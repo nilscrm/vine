@@ -6,13 +6,9 @@ error: unsafe items can only exist in unsafe traits
     @ unsafe_.vi:82:3
  82 |   unsafe const bar: (); // error
 
-error: this is unsafe
-    @ unsafe_.vi:89:1
- 89 | #[become(p)] // error
-
 error: unsafe enums cannot have a flex annotation
-    @ unsafe_.vi:95:16
- 95 | pub unsafe enum? Qux {}
+    @ unsafe_.vi:89:16
+ 89 | pub unsafe enum? Qux {}
 
 error: this is unsafe
     @ unsafe_.vi:20:3

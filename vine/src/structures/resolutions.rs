@@ -27,17 +27,6 @@ pub struct Resolutions {
 pub struct ResolvedImpl {
   pub kind: ResolvedImplKind,
   pub trait_id: TraitId,
-  pub become_: Become,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Become {
-  Unresolved,
-  Resolving,
-  /// The implementation this one becomes, the indices of this one's
-  /// implementation parameters which must also become it, and the
-  /// implementation arguments to pass to it (which can only be layouts).
-  Resolved(Option<(ImplId, Vec<usize>, Vec<TirImpl>)>),
 }
 
 #[derive(Debug)]

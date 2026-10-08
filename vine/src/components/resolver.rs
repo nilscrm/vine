@@ -175,9 +175,6 @@ impl<'a> Resolver<'a> {
     for id in self.chart.impls.keys_from(checkpoint.impls) {
       self.resolve_impl_def(id);
     }
-    for id in self.chart.impls.keys_from(checkpoint.impls) {
-      self.resolve_impl_become(id);
-    }
     for id in &self.chart.tests {
       self.resolve_test_fn(*id);
     }

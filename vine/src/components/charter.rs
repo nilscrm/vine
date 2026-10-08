@@ -204,21 +204,6 @@ impl Charter<'_> {
           };
           self.chart.impls[impl_id].basic = true;
         }
-        AttrKind::Become(path) => {
-          let Some(impl_id) = impl_id else {
-            self.diags.error(Diag::BadBecomeAttr { span });
-            continue;
-          };
-          let impl_ = &mut self.chart.impls[impl_id];
-          if impl_.become_.is_some() {
-            self.diags.error(Diag::DuplicateBecomeAttr { span });
-            continue;
-          }
-          if !attr.safe {
-            self.diags.error(Diag::Unsafe { span });
-          }
-          impl_.become_ = Some(path);
-        }
         AttrKind::Frameless => {
           let Some(concrete_fn_id) = concrete_fn_id else {
             self.diags.error(Diag::BadFramelessAttr { span });

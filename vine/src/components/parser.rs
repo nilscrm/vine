@@ -126,12 +126,6 @@ impl<'src> Parser<'src> {
         }
         "manual" => AttrKind::Manual,
         "basic" => AttrKind::Basic,
-        "become" => {
-          self.expect(Token::OpenParen)?;
-          let path = self.parse_path()?;
-          self.expect(Token::CloseParen)?;
-          AttrKind::Become(path)
-        }
         "frameless" => AttrKind::Frameless,
         "test" => AttrKind::Test,
         "self_dual" => AttrKind::SelfDual,

@@ -11,9 +11,7 @@ use crate::{
     chart::{Chart, ConstId, FnId},
     checkpoint::Checkpoint,
     diag::ErrorGuaranteed,
-    resolutions::{
-      Become, Fragment, FragmentId, Rels, Resolutions, ResolvedImpl, ResolvedImplKind,
-    },
+    resolutions::{Fragment, FragmentId, Rels, Resolutions, ResolvedImplKind},
     specializations::{
       ImplTree, ImplTreeId, ImplTreeKind, Spec, SpecId, SpecKind, SpecRels, Specializations,
     },
@@ -248,20 +246,7 @@ impl<'a> Specializer<'a> {
       TirImpl::Def(id, impls) => {
         let impls =
           impls.iter().map(|i| self.instantiate(fragment_id, args, i)).collect::<Vec<_>>();
-        if let Ok(ResolvedImpl {
-          become_: Become::Resolved(Some((become_impl, indices, become_args))),
-          ..
-        }) = &self.resolutions.impls[*id]
-          && indices.iter().all(|&i| {
-            matches!(self.specs.impls[impls[i]].kind, ImplTreeKind::Def(id, _) if id == *become_impl)
-          })
-        {
-          let become_args =
-            become_args.iter().map(|arg| self.instantiate(None, &impls, arg)).collect();
-          self.add_impl_tree(ImplTreeKind::Def(*become_impl, become_args))
-        } else {
-          self.add_impl_tree(ImplTreeKind::Def(*id, impls))
-        }
+        self.add_impl_tree(ImplTreeKind::Def(*id, impls))
       }
       TirImpl::Fn(id, impls, params) => {
         let impls = impls.iter().map(|i| self.instantiate(fragment_id, args, i)).collect();

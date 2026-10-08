@@ -3,7 +3,6 @@ use data::Iterator::{Iterator, Collect, Iterate};
 use debug::Show;
 use logical::Nullable;
 use ops::{Cast, Concat};
-use util::{duplicate, erase};
 
 pub struct Set[T](N32, Nullable[Box[SetNode[T]]]);
 
@@ -373,7 +372,6 @@ pub mod Set[T; Ord[T]] {
     }
   }
 
-  #[safe become(duplicate)]
   pub impl [T+]: Fork[Set[T]] {
     fn fork(&Set[T](len, node)) -> Set[T] {
       if len == 0 {
@@ -384,7 +382,6 @@ pub mod Set[T; Ord[T]] {
     }
   }
 
-  #[safe become(erase)]
   pub impl [T?]: Drop[Set[T]] {
     fn drop(Set[T](len, node)) {
       if len == 0 {

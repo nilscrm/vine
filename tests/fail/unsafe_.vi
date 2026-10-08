@@ -86,10 +86,4 @@ trait[] Baz {}
 
 impl p: Baz {}
 
-#[become(p)] // error
-impl q: Baz {}
-
-#[safe become(p)] // ok
-impl r: Baz {}
-
 pub unsafe enum? Qux {}

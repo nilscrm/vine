@@ -2,7 +2,6 @@
 use List::Stream;
 use logical::Nullable;
 use ops::{Cast, Index::{Index, IndexPlace, IndexSpace, IndexValue}};
-use util::{duplicate, erase};
 
 /// A contiguous, indexed collection of `T`.
 ///
@@ -354,7 +353,6 @@ pub mod Array {
     }
   }
 
-  #[safe become(duplicate)]
   pub impl [T+]: Fork[Array[T]] {
     fn fork(&Array[T](len, node)) -> Array[T] {
       if len == 0 {
@@ -365,7 +363,6 @@ pub mod Array {
     }
   }
 
-  #[safe become(erase)]
   pub impl [T?]: Drop[Array[T]] {
     fn drop(Array[T](len, node)) {
       if len == 0 {

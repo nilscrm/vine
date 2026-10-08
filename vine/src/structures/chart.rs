@@ -306,7 +306,6 @@ pub struct ImplDef {
   pub kind: ImplDefKind,
   pub manual: bool,
   pub basic: bool,
-  pub become_: Option<Path>,
   pub vis: VisId,
   pub unsafe_: bool,
 }
