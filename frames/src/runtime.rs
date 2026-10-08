@@ -14,15 +14,18 @@ use crate::{
   program::{BlockId, Instr, IoOp, OpId, Program, Reg},
 };
 
-/// The bits of a frame header holding the number of unfilled slots.
+/// A frame header holds the number of unfilled slots (including the code, if
+/// it has not been supplied yet) in its high bits, and the code in its low
+/// bits.
 const COUNTER_SHIFT: u32 = 48;
-const BLOCK_MASK: u64 = (1 << COUNTER_SHIFT) - 1;
+const CODE_MASK: u64 = (1 << COUNTER_SHIFT) - 1;
+/// The code of a frame whose code has not been supplied yet.
+const CODE_NONE: u64 = CODE_MASK;
+/// The code of a hole whose value is to be forwarded into the space stored
+/// after the value; the low bits hold the value's length.
+const CODE_FORWARD: u64 = 1 << (COUNTER_SHIFT - 1);
 /// The bits of a space holding the offset within the frame.
 const SPACE_OFFSET_BITS: u32 = 16;
-
-const HOLE_EMPTY: u64 = 0;
-const HOLE_FILLED: u64 = 1;
-const HOLE_WAITING: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeError {
@@ -38,7 +41,7 @@ pub enum RuntimeError {
     action: &'static str,
     what: &'static str,
   },
-  /// A hole was filled twice, or read twice.
+  /// A hole was read twice.
   HoleMisuse,
   Io(String),
 }
@@ -53,7 +56,7 @@ impl fmt::Display for RuntimeError {
         write!(f, "deadlock: the program stopped with {waiting} objects still live")
       }
       RuntimeError::Opaque { action, what } => write!(f, "cannot {action} {what}"),
-      RuntimeError::HoleMisuse => write!(f, "hole used more than once"),
+      RuntimeError::HoleMisuse => write!(f, "hole read more than once"),
       RuntimeError::Io(err) => write!(f, "io error: {err}"),
     }
   }
@@ -155,6 +158,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
   }
 
   fn decrement(&mut self, frame: Addr) {
+    debug_assert!(self.heap.get(frame) >> COUNTER_SHIFT != 0, "slot filled twice");
     let header = self.heap.get(frame) - (1 << COUNTER_SHIFT);
     self.heap.set(frame, header);
     if header >> COUNTER_SHIFT == 0 {
@@ -164,7 +168,12 @@ impl<'p, 'h> Runtime<'p, 'h> {
 
   fn run_frame(&mut self, frame: Addr) -> Result<(), RuntimeError> {
     let program = self.program;
-    let block_id = BlockId((self.heap.get(frame) & BLOCK_MASK) as usize);
+    let code = self.heap.get(frame) & CODE_MASK;
+    if code & CODE_FORWARD != 0 {
+      self.forward(frame, (code & !CODE_FORWARD) as u32);
+      return Ok(());
+    }
+    let block_id = BlockId(code as usize);
     let block = &program.blocks[block_id];
     self.stats.blocks_run += 1;
     if self.regs.len() < block.regs as usize {
@@ -237,39 +246,45 @@ impl<'p, 'h> Runtime<'p, 'h> {
           self.fill(frame, offset, *src, *len);
         }
 
-        Instr::HoleNew { dst, len } => {
+        Instr::HoleNew { dst, slots, len } => {
           let hole = self.heap.alloc(hole_size(*len));
-          self.heap.set(hole, HOLE_EMPTY);
+          self.heap.set(hole, ((*slots as u64 + 1) << COUNTER_SHIFT) | CODE_NONE);
           self.regs[dst.0 as usize] = hole.0;
         }
-        Instr::HoleSet { hole, src, len } => {
-          let hole = self.addr(*hole);
-          let words = self.regs[src.0 as usize..][..*len as usize].to_vec();
-          self.hole_set(hole, *len, &words)?;
-        }
-        Instr::HoleForward { promise, space, len } => {
-          let hole = self.addr(*promise);
-          let space = self.regs[space.0 as usize];
-          match self.heap.get(hole) {
-            HOLE_EMPTY => {
-              self.heap.set(hole, HOLE_WAITING);
-              self.heap.set(hole.offset(1), space);
-            }
-            HOLE_FILLED => {
-              let words = self.heap.slice(hole.offset(1), *len).to_vec();
-              self.heap.free(hole, hole_size(*len));
-              let (frame, offset) = decode_space(space);
-              self.fill_words(frame, offset, &words);
-            }
-            _ => Err(RuntimeError::HoleMisuse)?,
-          }
-        }
-        Instr::PromiseOf { dst, src, len } => {
+        Instr::HoleOf { dst, src, len } => {
           let hole = self.heap.alloc(hole_size(*len));
-          self.heap.set(hole, HOLE_FILLED);
+          self.heap.set(hole, (1 << COUNTER_SHIFT) | CODE_NONE);
           let src = &self.regs[src.0 as usize..][..*len as usize];
           self.heap.slice_mut(hole.offset(1), *len).copy_from_slice(src);
           self.regs[dst.0 as usize] = hole.0;
+        }
+        Instr::HoleForward { hole, space, len } => {
+          let hole = self.addr(*hole);
+          let header = self.heap.get(hole);
+          if header & CODE_MASK != CODE_NONE {
+            Err(RuntimeError::HoleMisuse)?
+          }
+          self.heap.set(hole.offset(len + 1), self.regs[space.0 as usize]);
+          self.heap.set(hole, (header & !CODE_MASK) | CODE_FORWARD | *len as u64);
+          if header >> COUNTER_SHIFT == 1 {
+            self.forward(hole, *len);
+          } else {
+            self.decrement(hole);
+          }
+        }
+        Instr::HoleTake { hole, dst, len, ok } => {
+          let hole = self.addr(*hole);
+          let header = self.heap.get(hole);
+          if header & CODE_MASK != CODE_NONE {
+            Err(RuntimeError::HoleMisuse)?
+          }
+          let filled = header >> COUNTER_SHIFT == 1;
+          if filled {
+            let words = self.heap.slice(hole.offset(1), *len);
+            self.regs[dst.0 as usize..][..*len as usize].copy_from_slice(words);
+            self.heap.free(hole, hole_size(*len));
+          }
+          self.regs[ok.0 as usize] = filled as u64;
         }
 
         Instr::Jump { target } => {
@@ -296,21 +311,14 @@ impl<'p, 'h> Runtime<'p, 'h> {
     Addr(self.regs[reg.0 as usize])
   }
 
-  fn hole_set(&mut self, hole: Addr, len: u32, words: &[u64]) -> Result<(), RuntimeError> {
-    match self.heap.get(hole) {
-      HOLE_EMPTY => {
-        self.heap.set(hole, HOLE_FILLED);
-        self.heap.slice_mut(hole.offset(1), len).copy_from_slice(words);
-      }
-      HOLE_WAITING => {
-        let space = self.heap.get(hole.offset(1));
-        self.heap.free(hole, hole_size(len));
-        let (frame, offset) = decode_space(space);
-        self.fill_words(frame, offset, words);
-      }
-      _ => Err(RuntimeError::HoleMisuse)?,
-    }
-    Ok(())
+  /// Forwards the value of a hole whose value slots have all been filled,
+  /// and frees the hole.
+  fn forward(&mut self, hole: Addr, len: u32) {
+    let words = self.heap.slice(hole.offset(1), len).to_vec();
+    let space = self.heap.get(hole.offset(len + 1));
+    self.heap.free(hole, hole_size(len));
+    let (frame, offset) = decode_space(space);
+    self.fill_words(frame, offset, &words);
   }
 
   fn io(&mut self, op: IoOp, args: &[u64]) -> Result<Vec<u64>, RuntimeError> {
@@ -446,8 +454,10 @@ fn decode_space(space: u64) -> (Addr, u32) {
   (Addr(space >> SPACE_OFFSET_BITS), (space & ((1 << SPACE_OFFSET_BITS) - 1)) as u32)
 }
 
+/// The size of a hole frame for a value of `len` words: the header, the value,
+/// and the space to forward it to.
 fn hole_size(len: u32) -> u32 {
-  1 + len.max(1)
+  len + 2
 }
 
 /// Reads a single unicode character, returning the number of bytes read, and

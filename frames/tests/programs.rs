@@ -149,42 +149,73 @@ fn deep_recursion() {
   assert_eq!(live, 0);
 }
 
-/// Creates a hole; forwards the promise into a frame, and fills the hole,
-/// in either order.
-fn hole_program(set_first: bool) -> Program {
+/// Creates a hole for a two-word value, filled in two parts through spaces;
+/// the hole's value is forwarded into a frame, before, between, or after the
+/// parts are filled.
+fn hole_program(forward_after: usize) -> Program {
   let mut program = Program::default();
   let done = BlockId(1);
-  let set =
-    vec![Const { dst: r(3), value: b'!' as u64 }, HoleSet { hole: r(0), src: r(3), len: 1 }];
+  let fill = |part: u32, char: u8| {
+    vec![
+      Space { dst: r(4), frame: r(0), offset: 1 + part },
+      Const { dst: r(3), value: char as u64 },
+      Write { space: r(4), src: r(3), len: 1 },
+    ]
+  };
   let forward = vec![
     NewFrame { dst: r(1), block: done },
     Space { dst: r(2), frame: r(1), offset: 1 },
-    HoleForward { promise: r(0), space: r(2), len: 1 },
+    HoleForward { hole: r(0), space: r(2), len: 2 },
   ];
-  let mut code = vec![HoleNew { dst: r(0), len: 1 }];
-  if set_first {
-    code.extend(set);
-    code.extend(forward);
-  } else {
-    code.extend(forward);
-    code.extend(set);
-  }
+  let mut parts = vec![fill(0, b'h'), fill(1, b'i')];
+  parts.insert(forward_after, forward);
+  let mut code = vec![HoleNew { dst: r(0), slots: 2, len: 2 }];
+  code.extend(parts.into_iter().flatten());
   code.push(End);
-  program.entry = program.blocks.push(block("entry", 0, 0, 4, code));
+  program.entry = program.blocks.push(block("entry", 0, 0, 5, code));
   _ = program.blocks.push(block(
     "done",
     1,
-    1,
     2,
-    vec![Const { dst: r(1), value: 0 }, print(r(1), r(0)), Halt, End],
+    3,
+    vec![Const { dst: r(2), value: 0 }, print(r(2), r(0)), print(r(2), r(1)), Halt, End],
   ));
   program
 }
 
 #[test]
 fn holes() {
-  assert_eq!(run(&hole_program(true)), Ok(("!".into(), 0)));
-  assert_eq!(run(&hole_program(false)), Ok(("!".into(), 0)));
+  for forward_after in 0..3 {
+    assert_eq!(run(&hole_program(forward_after)), Ok(("hi".into(), 0)));
+  }
+}
+
+#[test]
+fn hole_take() {
+  // `HoleTake` fails while the value is missing, and succeeds once it is
+  // filled, or for a hole created with `HoleOf`.
+  let mut program = Program::default();
+  let code = vec![
+    HoleNew { dst: r(0), slots: 1, len: 1 },
+    HoleTake { hole: r(0), dst: r(1), len: 1, ok: r(2) },
+    Const { dst: r(9), value: 0 },
+    Const { dst: r(3), value: b'0' as u64 },
+    Op { op: program.op("n32:add"), args: vec![r(2), r(3)], rets: vec![r(4)] },
+    print(r(9), r(4)),
+    Space { dst: r(5), frame: r(0), offset: 1 },
+    Const { dst: r(6), value: b'a' as u64 },
+    Write { space: r(5), src: r(6), len: 1 },
+    HoleTake { hole: r(0), dst: r(1), len: 1, ok: r(2) },
+    print(r(9), r(1)),
+    Const { dst: r(6), value: b'b' as u64 },
+    HoleOf { dst: r(0), src: r(6), len: 1 },
+    HoleTake { hole: r(0), dst: r(1), len: 1, ok: r(2) },
+    print(r(9), r(1)),
+    Halt,
+    End,
+  ];
+  program.entry = program.blocks.push(block("entry", 0, 0, 10, code));
+  assert_eq!(run(&program), Ok(("0ab".into(), 0)));
 }
 
 #[test]

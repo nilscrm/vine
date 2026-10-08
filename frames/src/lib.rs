@@ -16,10 +16,11 @@
 //! "returns" by writing its result into it, which may make the caller's
 //! continuation frame ready.
 //!
-//! A *hole* is a single-use cell for a value that may not exist yet, with one
-//! writer (the `Hole`) and one reader (the `Promise`). Unlike a frame, a hole
-//! does not know what will happen to its value; the reader decides, by
-//! forwarding the value into a space once it is available.
+//! A *hole* is a frame whose code is supplied later: its slots receive a
+//! value through spaces, like any other frame, but what happens to the value
+//! is decided by the hole's reader, which supplies the code afterwards; e.g.
+//! forwarding the value into another space. A hole's header counts the code
+//! as one more unfilled slot.
 //!
 //! Values are stored inline, using as many words as their layout requires.
 //! Deep copies and frees of heap data are described by [`Layout`]s.

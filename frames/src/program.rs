@@ -164,29 +164,34 @@ pub enum Instr {
     len: u32,
   },
 
-  /// Allocates an empty hole for a value of `len` words; the resulting word
-  /// is used as both the `Promise` and the `Hole`.
+  /// Allocates a hole for a value of `len` words: a frame whose code has not
+  /// been supplied yet. The value is filled through spaces pointing into it,
+  /// in `slots` parts; the value occupies offsets `1..=len`.
   HoleNew {
     dst: Reg,
+    slots: u16,
     len: u32,
   },
-  /// Fills a hole.
-  HoleSet {
-    hole: Reg,
+  /// Allocates a hole whose value has already been filled.
+  HoleOf {
+    dst: Reg,
     src: Reg,
     len: u32,
   },
-  /// Once the promised value is available, writes it into `space`.
+  /// Supplies a hole's code: once its value has been filled, the value is
+  /// written into `space`, and the hole is freed.
   HoleForward {
-    promise: Reg,
+    hole: Reg,
     space: Reg,
     len: u32,
   },
-  /// Allocates a filled hole, returning its promise.
-  PromiseOf {
+  /// If a hole's value has been filled, moves it into `dst`, frees the hole,
+  /// and sets `ok` to `1`; otherwise, sets `ok` to `0`.
+  HoleTake {
+    hole: Reg,
     dst: Reg,
-    src: Reg,
     len: u32,
+    ok: Reg,
   },
 
   Jump {

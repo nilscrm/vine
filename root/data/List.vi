@@ -1,5 +1,5 @@
 
-use data::{Hole, Iterator::{Iterator, Collect, Iterate}, Promise};
+use data::{Hole, Iterator::{Iterator, Collect, Iterate}};
 use ops::{Cast, Concat, Range::{Range, Bound}};
 use util::erase;
 
@@ -25,11 +25,11 @@ use util::erase;
 ///
 /// If frequently accessing elements by index, consider using an array instead.
 #[builtin = "List"]
-pub struct List[T](pub.root (N32, Promise[Stream[T]], Hole[Stream[T]]));
+pub struct List[T](pub.root (N32, Hole[Stream[T]], ~Stream[T]));
 
 pub.root unsafe enum Stream[T] {
   done(),
-  more(T, Promise[Stream[T]]),
+  more(T, Hole[Stream[T]]),
 }
 
 pub mod List {
@@ -180,7 +180,7 @@ pub mod List {
 
   pub impl [T]: Concat[List[T], List[T], List[T]] {
     fn concat(List[T](a_len, a_front, a_back), List[T](b_len, b_front, b_back)) -> List[T] {
-      b_front.link(a_back);
+      b_front.forward(a_back);
       List(a_len + b_len, a_front, b_back)
     }
   }
@@ -414,7 +414,7 @@ pub mod List {
     }
   }
 
-  pub struct IterRef[T](N32, &Promise[Stream[T]]);
+  pub struct IterRef[T](N32, &Hole[Stream[T]]);
 
   pub mod IterRef {
     pub impl [T]: Iterator[IterRef[T], &T] {
@@ -532,42 +532,42 @@ pub mod List {
 
 pub.root mod Stream {
   /// An empty stream: its front, and the hole at its end.
-  pub const pair[T]: (Promise[Stream[T]], Hole[Stream[T]]) = Hole::new();
+  pub const pair[T]: (Hole[Stream[T]], ~Stream[T]) = Hole::new();
 
   /// Appends `value` at the end of the stream, `back` being the hole at its
   /// end.
-  pub fn push_back[T](&back: &Hole[Stream[T]], value: T) {
+  pub fn push_back[T](&back: &~Stream[T], value: T) {
     let old = back;
-    let (front, hole) = Hole::new();
-    old.set(safe Stream::more(value, front));
-    back = hole;
+    let (front, space) = Hole::new();
+    ~old = safe Stream::more(value, front);
+    back = space;
   }
 
   /// Prepends `value` to the stream starting at `front`.
-  pub fn push_front[T](&front: &Promise[Stream[T]], value: T) {
-    front = Promise::of(safe Stream::more(value, front));
+  pub fn push_front[T](&front: &Hole[Stream[T]], value: T) {
+    front = Hole::of(safe Stream::more(value, front));
   }
 
-  pub unsafe fn pop[T](&front: &Promise[Stream[T]]) -> T {
+  pub unsafe fn pop[T](&front: &Hole[Stream[T]]) -> T {
     let Stream::more(head, tail) = front.get();
     front = tail;
     head
   }
 
-  pub unsafe fn head[T](&front: &Promise[Stream[T]]) -> &T {
+  pub unsafe fn head[T](&front: &Hole[Stream[T]]) -> &T {
     let &Stream::more(head, _) = front.as_ref();
     &head
   }
 
-  pub unsafe fn tail[T](&front: &Promise[Stream[T]]) -> &Promise[Stream[T]] {
+  pub unsafe fn tail[T](&front: &Hole[Stream[T]]) -> &Hole[Stream[T]] {
     let &Stream::more(_, tail) = front.as_ref();
     &tail
   }
 
   /// Closes an empty stream, `front` being its front and `back` the hole at
   /// its end.
-  pub unsafe fn close[T](front: Promise[Stream[T]], back: Hole[Stream[T]]) {
-    back.set(Stream::done());
+  pub unsafe fn close[T](front: Hole[Stream[T]], back: ~Stream[T]) {
+    ~back = Stream::done();
     Stream::done() = front.get();
   }
 }

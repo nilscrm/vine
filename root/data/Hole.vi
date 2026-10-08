@@ -1,36 +1,51 @@
 
-use data::Promise;
 use util::transmute;
 
-/// The write end of a single-use slot for a value of type `T`. Each `Hole`
-/// must be filled exactly once, with `.set`; the value can then be read from
-/// the corresponding `Promise`.
+/// A value of type `T` that may not exist yet; it is supplied through the
+/// space returned alongside it by `Hole::new`.
 /// ```vi
-/// let (promise, hole) = Hole::new[N32]();
-/// hole.set(46);
-/// promise.get() // 46
+/// let (hole, space) = Hole::new[N32]();
+/// ~space = 46;
+/// hole.get() // 46
 /// ```
 pub type Hole[T];
 
 pub mod Hole {
-  /// Creates a new, empty slot, returning its read end and its write end.
+  /// Creates a new hole, returning it and the space through which its value is
+  /// supplied.
   #[intrinsic = "hole:new"]
-  pub fn new[T]() -> (Promise[T], Hole[T]) {
+  pub fn new[T]() -> (Hole[T], ~T) {
     let loop value;
-    (safe transmute[T, Promise[T]](value), safe transmute[~T, Hole[T]](~value))
+    (safe transmute(value), ~value)
   }
 
-  /// Fills the slot with `value`.
-  #[intrinsic = "hole:set"]
-  pub fn .set[T](self: Hole[T], value: T) {
-    let space = safe transmute[Hole[T], ~T](self);
-    ~space = value;
+  /// Creates a hole whose value has already been supplied.
+  #[intrinsic = "hole:of"]
+  pub fn of[T](value: T) -> Hole[T] {
+    safe transmute(value)
   }
 
-  /// Converts this `Hole` into a space; whatever is put into the space will
-  /// fill the slot.
-  #[intrinsic = "hole:into_space"]
-  pub fn .into_space[T](self: Hole[T]) -> ~T {
+  /// Returns the hole's value, waiting for it to be supplied if necessary.
+  #[intrinsic = "hole:get"]
+  pub fn .get[T](self: Hole[T]) -> T {
     safe transmute(self)
+  }
+
+  /// Passes the hole's value on to `to`, once it is supplied.
+  #[intrinsic = "hole:forward"]
+  pub fn .forward[T](self: Hole[T], to: ~T) {
+    ~to = self.get();
+  }
+
+  /// Borrows the hole's value, waiting for it to be supplied if necessary.
+  #[intrinsic = "hole:as_ref"]
+  pub fn .as_ref[T](&self: &Hole[T]) -> &T {
+    safe transmute[&Hole[T], &T](&self)
+  }
+
+  pub impl drop[T?]: Drop[Hole[T]] {
+    fn drop(self: Hole[T]) {
+      _ = self.get();
+    }
   }
 }
