@@ -75,11 +75,11 @@ pub mod Array {
   /// array // Array([1, 2, 3])
   /// ```
   pub fn from_fn[T, F*; fn F() -> T](len: N32, f: F) -> Array[T] {
-    let array = Array::empty;
-    for _ in 0..len {
-      array.push_back(f());
+    if len == 0 {
+      Array::empty
+    } else {
+      Array(len, safe Nullable::data(Node::from_values(len, List::from_fn(len, f))))
     }
-    array
   }
 
   /// Iterate over the values of the array in order.
@@ -99,14 +99,17 @@ pub mod Array {
   /// });
   /// str // "f(f(f(initial, 1), 2), 3)"
   /// ```
-  pub fn .fold_front[T, U, F*; fn F(U, T) -> U](self: Array[T], initial: U, f: F) -> U {
-    let acc = initial;
-    while self.pop_front() is Some(value) {
-      acc = f(acc, value);
+  pub fn .fold_front[T, U, F*; fn F(U, T) -> U](Array[T](len, node), initial: U, f: F) -> U {
+    if len == 0 {
+      safe node.null;
+      initial
+    } else {
+      let acc = initial;
+      for value in Node::to_values(len, safe node.data) {
+        acc = f(acc, value);
+      }
+      acc
     }
-    let Array(_, node) = self;
-    safe node.null;
-    acc
   }
 
   /// Fold over the array, starting from the back.
@@ -117,14 +120,17 @@ pub mod Array {
   /// });
   /// str // "f(1, f(2, f(3, initial)))"
   /// ```
-  pub fn .fold_back[T, U, F*; fn F(U, T) -> U](self: Array[T], initial: U, f: F) -> U {
-    let acc = initial;
-    while self.pop_back() is Some(value) {
-      acc = f(acc, value);
+  pub fn .fold_back[T, U, F*; fn F(U, T) -> U](Array[T](len, node), initial: U, f: F) -> U {
+    if len == 0 {
+      safe node.null;
+      initial
+    } else {
+      let acc = initial;
+      for value in Node::to_values(len, safe node.data).reversed() {
+        acc = f(acc, value);
+      }
+      acc
     }
-    let Array(_, node) = self;
-    safe node.null;
-    acc
   }
 
   pub fn .reduce_unordered[T, F*; fn F(T, T) -> T](Array[T](len, node), f: F) -> Option[T] {
@@ -546,6 +552,63 @@ mod Node {
     }
   }
 
+  /// Returns the values of a node of length `len`, in order. `O(n)`
+  ///
+  /// The value at index `i` is at the leaf whose path from the root is given
+  /// by the bits of `i`, lowest first. Thus, the subtrees at depth `k` hold the
+  /// values whose indices are congruent modulo `2^k`; listing each level's
+  /// left children before its right children keeps them sorted by that
+  /// residue, and the last level lists the values in order.
+  pub fn to_values[T](len: N32, node: Node[T]) -> List[T] {
+    let row = [node];
+    let width = 1;
+    while width < len {
+      let lefts = [];
+      let rights = [];
+      let residue = 0;
+      for node in row {
+        let size = (len - residue + width - 1) / width;
+        if size == 1 {
+          lefts.push_back(node);
+        } else {
+          let safe Node::branch(Box(left, right)) = node;
+          lefts.push_back(left);
+          rights.push_back(right);
+        }
+        residue += 1;
+      }
+      row = lefts ++ rights;
+      width *= 2;
+    }
+    List::map(row, fn* (node: Node[T]) { safe node.leaf })
+  }
+
+  /// Builds a node from its `len` values, in order; the inverse of
+  /// `to_values`. `O(n)`
+  pub fn from_values[T](len: N32, values: List[T]) -> Node[T] {
+    let width = 1;
+    while width < len {
+      width *= 2;
+    }
+    let row = List::map(values, fn* (value: T) { safe Node::leaf(value) });
+    while width > 1 {
+      width /= 2;
+      let (lefts, rights) = row.split_at(width);
+      row = [];
+      for left in lefts {
+        row.push_back(if rights.pop_front() is Some(right) {
+          safe Node::branch(Box(left, right))
+        } else {
+          left
+        });
+      }
+      close_empty(rights);
+    }
+    let node = row.pop_front().assume();
+    close_empty(row);
+    node
+  }
+
   /// Removes the first value of a node of length `len`, which must be at
   /// least `2`; the inverse of `push_front`.
   pub fn pop_front[T](len: N32, &node: &Node[T]) -> T {
@@ -574,4 +637,9 @@ mod Node {
       Node::pop_back((len - 1) / 2 + 1, &half)
     }
   }
+}
+
+/// Consumes an empty list, without requiring its values to be droppable.
+fn close_empty[T](List[T](_, front, back)) {
+  safe Stream::close(front, back);
 }
