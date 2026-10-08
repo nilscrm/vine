@@ -2,6 +2,7 @@
 /// Data structures.
 mod;
 
+pub mod Box;
 pub mod List;
 pub mod Array;
 

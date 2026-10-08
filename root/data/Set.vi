@@ -5,7 +5,7 @@ use logical::Nullable;
 use ops::{Cast, Concat};
 use util::{duplicate, erase};
 
-pub struct Set[T](N32, Nullable[SetNode[T]]);
+pub struct Set[T](N32, Nullable[Box[SetNode[T]]]);
 
 type SetNode[T] = (Set[T], T, Set[T]);
 
@@ -17,7 +17,7 @@ pub mod Set[T; Ord[T]] {
   pub const empty[T]: Set[T] = Set(0, safe Nullable::null());
 
   fn new[T](left: Set[T], value: T, right: Set[T]) -> Set[T] {
-    Set(left.len() + right.len() + 1, safe Nullable::data(left, value, right))
+    Set(left.len() + right.len() + 1, safe Nullable::data(Box(left, value, right)))
   }
 
   pub impl from_list[... T?]: Cast[List[T], Set[T]] {
@@ -42,16 +42,16 @@ pub mod Set[T; Ord[T]] {
     if len == 0 {
       len = 1;
       safe node.null;
-      safe node.data = (empty, new, empty);
+      safe node.data = Box(empty, new, empty);
       None()
     } else {
-      let &(left, value, right) = safe &node.data;
+      let &(left, value, right) = safe &node.data!;
       let old;
       match new.cmp(&value) {
         Ord::Lt() {
           old = left.insert(new);
-          len = size(safe &node.data);
-          balance_right(safe &node.data);
+          len = size(safe &node.data!);
+          balance_right(safe &node.data!);
         }
         Ord::Eq() {
           old = Some(value);
@@ -59,8 +59,8 @@ pub mod Set[T; Ord[T]] {
         }
         Ord::Gt() {
           old = right.insert(new);
-          len = size(safe &node.data);
-          balance_left(safe &node.data);
+          len = size(safe &node.data!);
+          balance_left(safe &node.data!);
         }
       }
       old
@@ -86,7 +86,7 @@ pub mod Set[T; Ord[T]] {
     if len == 0 {
       false
     } else {
-      let &(left, value, right) = safe &node.data;
+      let &(left, value, right) = safe &node.data!;
       match cmp(&value) {
         Ord::Lt() { left.has_by(cmp) }
         Ord::Eq() { true }
@@ -105,7 +105,7 @@ pub mod Set[T; Ord[T]] {
     if len == 0 {
       None()
     } else {
-      let &(left, value, right) = safe &node.data;
+      let &(left, value, right) = safe &node.data!;
       match cmp(&value) {
         Ord::Lt() { left.at_eq_by(cmp) }
         Ord::Eq() { Some(&value) }
@@ -128,7 +128,7 @@ pub mod Set[T; Ord[T]] {
     if len == 0 {
       None()
     } else {
-      let &(left, value, right) = safe &node.data;
+      let &(left, value, right) = safe &node.data!;
       match cmp(&value) {
         Ord::Lt() { left.at_le_by(cmp) }
         Ord::Eq() { Some(&value) }
@@ -157,7 +157,7 @@ pub mod Set[T; Ord[T]] {
     if len == 0 {
       None()
     } else {
-      let &(left, value, right) = safe &node.data;
+      let &(left, value, right) = safe &node.data!;
       match cmp(&value) {
         Ord::Lt() {
           if left.at_ge_by(cmp) is Some(value) {
@@ -186,14 +186,14 @@ pub mod Set[T; Ord[T]] {
     if len == 0 {
       None()
     } else {
-      let (left, value, right) = safe node.data;
+      let (left, value, right) = safe node.data!;
       let old;
       match cmp(&value) {
         Ord::Lt() {
           old = left.remove_by(cmp);
-          safe node.data = (left, value, right);
-          len = Set::size(safe &node.data);
-          balance_left(safe &node.data);
+          safe node.data = Box(left, value, right);
+          len = Set::size(safe &node.data!);
+          balance_left(safe &node.data!);
         }
         Ord::Eq() {
           old = Some(value);
@@ -202,9 +202,9 @@ pub mod Set[T; Ord[T]] {
         }
         Ord::Gt() {
           old = right.remove_by(cmp);
-          safe node.data = (left, value, right);
-          len = Set::size(safe &node.data);
-          balance_right(safe &node.data);
+          safe node.data = Box(left, value, right);
+          len = Set::size(safe &node.data!);
+          balance_right(safe &node.data!);
         }
       }
       old
@@ -229,30 +229,30 @@ pub mod Set[T; Ord[T]] {
 
   fn ._remove_min[T](&Set[T](len, node)) -> T {
     len -= 1;
-    let (left, value, right) = safe node.data;
+    let (left, value, right) = safe node.data!;
     if left.len() == 0 {
       Set(_, safe Nullable::null()) = left;
       Set(_, node) = right;
       value
     } else {
       let min = left._remove_min();
-      safe node.data = (left, value, right);
-      balance_left(safe &node.data);
+      safe node.data = Box(left, value, right);
+      balance_left(safe &node.data!);
       min
     }
   }
 
   fn ._remove_max[T](&Set[T](len, node)) -> T {
     len -= 1;
-    let (left, value, right) = safe node.data;
+    let (left, value, right) = safe node.data!;
     if right.len() == 0 {
       Set(_, node) = left;
       Set(_, safe Nullable::null()) = right;
       value
     } else {
       let max = right._remove_max();
-      safe node.data = (left, value, right);
-      balance_right(safe &node.data);
+      safe node.data = Box(left, value, right);
+      balance_right(safe &node.data!);
       max
     }
   }
@@ -265,7 +265,7 @@ pub mod Set[T; Ord[T]] {
       safe node.null;
       Set::empty
     } else {
-      let (left, value, right) = safe node.data;
+      let (left, value, right) = safe node.data!;
       Set::new(Set::map(left, f), f(value), Set::map(right, f))
     }
   }
@@ -286,7 +286,7 @@ pub mod Set[T; Ord[T]] {
           if len == 0 {
             break;
           }
-          let &(left, value, right) = safe &node.data;
+          let &(left, value, right) = safe &node.data!;
           stack.push_front(&(value, right));
           current = &left;
           continue;
@@ -318,7 +318,7 @@ pub mod Set[T; Ord[T]] {
             safe node.null;
             break;
           }
-          let (left, value, right) = safe node.data;
+          let (left, value, right) = safe node.data!;
           stack.push_front((value, right));
           current = left;
           continue;
@@ -346,7 +346,7 @@ pub mod Set[T; Ord[T]] {
         safe node.null;
         []
       } else {
-        let (left, value, right) = safe node.data;
+        let (left, value, right) = safe node.data!;
         left as List ++ [value] ++ right as List
       }
     }
@@ -367,7 +367,7 @@ pub mod Set[T; Ord[T]] {
     if len == 0 {
       true
     } else {
-      let &(left, _, right) = safe &node.data;
+      let &(left, _, right) = safe &node.data!;
       let x = is_balanced(&left, &right) and is_balanced(&right, &left);
       x and left.balanced() and right.balanced()
     }
@@ -379,7 +379,7 @@ pub mod Set[T; Ord[T]] {
       if len == 0 {
         Set::empty
       } else {
-        Set(len, safe Nullable::data(node.data.fork()))
+        Set(len, safe Nullable::data(Box(node.data!.fork())))
       }
     }
   }
@@ -390,7 +390,7 @@ pub mod Set[T; Ord[T]] {
       if len == 0 {
         safe node.null;
       } else {
-        _ = safe node.data;
+        _ = safe node.data!;
       }
     }
   }
@@ -401,11 +401,11 @@ fn balance_left[T](&node: &SetNode[T]) {
   node = if is_balanced(&l, &r) {
     (l, e, r)
   } else {
-    let Set(_, safe Nullable::data(rl, re, rr)) = r;
+    let Set(_, safe Nullable::data(Box(rl, re, rr))) = r;
     if is_single(&rl, &rr) {
       (Set::new(l, e, rl), re, rr)
     } else {
-      let Set(_, safe Nullable::data(rll, rle, rlr)) = rl;
+      let Set(_, safe Nullable::data(Box(rll, rle, rlr))) = rl;
       (Set::new(l, e, rll), rle, Set::new(rlr, re, rr))
     }
   }
@@ -416,17 +416,20 @@ fn balance_right[T](&node: &SetNode[T]) {
   node = if is_balanced(&r, &l) {
     (l, e, r)
   } else {
-    let Set(_, safe Nullable::data(ll, le, lr)) = l;
+    let Set(_, safe Nullable::data(Box(ll, le, lr))) = l;
     if is_single(&lr, &ll) {
       (ll, le, Set::new(lr, e, r))
     } else {
-      let Set(_, safe Nullable::data(lrl, lre, lrr)) = lr;
+      let Set(_, safe Nullable::data(Box(lrl, lre, lrr))) = lr;
       (Set::new(ll, le, lrl), lre, Set::new(lrr, e, r))
     }
   }
 }
 
-fn merge_balanced[T](Set[T](len_left, left), Set[T](len_right, right)) -> Nullable[SetNode[T]] {
+fn merge_balanced[T](
+  Set[T](len_left, left),
+  Set[T](len_right, right),
+) -> Nullable[Box[SetNode[T]]] {
   when {
     len_left == 0 {
       safe left.null;
@@ -440,7 +443,7 @@ fn merge_balanced[T](Set[T](len_left, left), Set[T](len_right, right)) -> Nullab
       let left = Set(len_left, left);
       let right = Set(len_right, right);
       let value = if len_left > len_right { left._remove_max() } else { right._remove_min() };
-      safe Nullable::data(left, value, right)
+      safe Nullable::data(Box(left, value, right))
     }
   }
 }

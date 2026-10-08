@@ -1,0 +1,14 @@
+
+/// A value stored in its own heap allocation, rather than inline.
+///
+/// Values are normally stored inline, wherever they are used; a `Box` holds a
+/// pointer instead. This is required for recursive types, whose values would
+/// otherwise contain themselves, and can be used to make large values cheaper
+/// to move.
+/// ```vi
+/// let b = Box(46);
+/// b! // 46
+/// ```
+#[builtin = "Box"]
+#[self_dual]
+pub struct* Box[T](pub T);

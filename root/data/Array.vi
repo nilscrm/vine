@@ -412,7 +412,7 @@ pub mod Array {
 /// ```vi
 /// Array(
 ///   5,
-///   Nullable::data(Node::branch(
+///   Nullable::data(Node::branch(Box(
 ///     Node::branch(
 ///       Node::branch(
 ///         Node::leaf(0),
@@ -430,13 +430,13 @@ pub mod Array {
 ///       ),
 ///       Node::leaf(3),
 ///     ),
-///   )),
+///   ))),
 /// )
 /// ```
 #[self_dual]
 unsafe enum Node[T] {
   leaf(T),
-  branch(Node[T], Node[T]),
+  branch(Box[(Node[T], Node[T])]),
 }
 
 mod Node {
@@ -444,11 +444,11 @@ mod Node {
     if len == 1 {
       safe Node::leaf(value)
     } else {
-      safe Node::branch(Node::new((len + 1) / 2, value), Node::new(len / 2, value))
+      safe Node::branch(Box(Node::new((len + 1) / 2, value), Node::new(len / 2, value)))
     }
   }
 
-  pub unsafe fn .half[T](&Node::branch[T](l, r), len: N32, x: N32) -> (&Node[T], N32) {
+  pub unsafe fn .half[T](&Node::branch[T](Box(l, r)), len: N32, x: N32) -> (&Node[T], N32) {
     if x == 0 {
       (&l, (len + 1) / 2)
     } else {
@@ -460,7 +460,7 @@ mod Node {
     if len == 1 {
       safe node.leaf
     } else {
-      let safe Node::branch(l, r) = node;
+      let safe Node::branch(Box(l, r)) = node;
       f(l.reduce_unordered((len + 1) / 2, f), r.reduce_unordered(len / 2, f))
     }
   }
@@ -469,14 +469,14 @@ mod Node {
     if len == 1 {
       safe Node::leaf(f(node.leaf))
     } else {
-      let safe Node::branch(l, r) = node;
-      safe Node::branch(map_unordered(l, (len + 1) / 2, f), map_unordered(r, len / 2, f))
+      let safe Node::branch(Box(l, r)) = node;
+      safe Node::branch(Box(map_unordered(l, (len + 1) / 2, f), map_unordered(r, len / 2, f)))
     }
   }
 
   pub fn .reverse[T](&self: &Node[T], len: N32) {
     if len != 1 {
-      let safe &Node::branch(left, right) = &self;
+      let safe &Node::branch(Box(left, right)) = &self;
       if len % 2 == 0 {
         swap(&left, &right);
       }
@@ -489,9 +489,9 @@ mod Node {
     if len == 1 {
       safe Node::leaf(f(x.leaf, y.leaf))
     } else {
-      let safe Node::branch(xl, xr) = x;
-      let safe Node::branch(yl, yr) = y;
-      safe Node::branch(zip_with((len + 1) / 2, xl, yl, f), zip_with(len / 2, xr, yr, f))
+      let safe Node::branch(Box(xl, xr)) = x;
+      let safe Node::branch(Box(yl, yr)) = y;
+      safe Node::branch(Box(zip_with((len + 1) / 2, xl, yl, f), zip_with(len / 2, xr, yr, f)))
     }
   }
 
@@ -513,8 +513,8 @@ mod Node {
     if len == 1 {
       safe self.leaf == other.leaf
     } else {
-      let safe &Node::branch(l, r) = &self;
-      let safe &Node::branch(other_l, other_r) = &other;
+      let safe &Node::branch(Box(l, r)) = &self;
+      let safe &Node::branch(Box(other_l, other_r)) = &other;
       eq((len + 1) / 2, &l, &other_l) and eq(len / 2, &r, &other_r)
     }
   }
@@ -523,8 +523,8 @@ mod Node {
     if len == 1 {
       safe Node::leaf(node.leaf.fork())
     } else {
-      let safe &Node::branch(l, r) = &node;
-      safe Node::branch(fork((len + 1) / 2, &l), fork(len / 2, &r))
+      let safe &Node::branch(Box(l, r)) = &node;
+      safe Node::branch(Box(fork((len + 1) / 2, &l), fork(len / 2, &r)))
     }
   }
 
@@ -532,7 +532,7 @@ mod Node {
     if len == 1 {
       _ = safe node.leaf;
     } else {
-      let safe Node::branch(l, r) = node;
+      let safe Node::branch(Box(l, r)) = node;
       drop((len + 1) / 2, l);
       drop(len / 2, r);
     }
@@ -540,9 +540,9 @@ mod Node {
 
   pub fn push_front[T](len: N32, &node: &Node[T], value: T) {
     if len == 1 {
-      node = safe Node::branch(Node::leaf(value), node);
+      node = safe Node::branch(Box(Node::leaf(value), node));
     } else {
-      let safe &Node::branch(left, right) = &node;
+      let safe &Node::branch(Box(left, right)) = &node;
       swap(&left, &right);
       Node::push_front(len / 2, &left, value);
     }
@@ -550,9 +550,9 @@ mod Node {
 
   pub fn push_back[T](len: N32, &node: &Node[T], value: T) {
     if len == 1 {
-      node = safe Node::branch(node, Node::leaf(value));
+      node = safe Node::branch(Box(node, Node::leaf(value)));
     } else {
-      let safe &Node::branch(left, right) = &node;
+      let safe &Node::branch(Box(left, right)) = &node;
       let &half = if len % 2 == 0 { &left } else { &right };
       Node::push_back(len / 2, &half, value)
     }

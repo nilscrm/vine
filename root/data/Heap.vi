@@ -5,7 +5,7 @@ use util::{duplicate, erase};
 use data::Iterator::{Iterator, Iterate};
 
 /// A min-heap, which provides efficient access to the smallest value in the heap.
-pub struct Heap[T](N32, Nullable[Node[T]]);
+pub struct Heap[T](N32, Nullable[Box[Node[T]]]);
 
 type Node[T] = (T, Heap[T], Heap[T]);
 
@@ -25,7 +25,7 @@ pub mod Heap[T; Ord[T]] {
   /// Heap::single(46) // Heap([46])
   /// ```
   pub fn single[T](value: T) -> Heap[T] {
-    Heap(1, safe Nullable::data(value, Heap::empty, Heap::empty))
+    Heap(1, safe Nullable::data(Box(value, Heap::empty, Heap::empty)))
   }
 
   /// Insert a value into the heap. `O(log n)`
@@ -45,7 +45,7 @@ pub mod Heap[T; Ord[T]] {
     if rank == 0 {
       None()
     } else {
-      let (value, left, right) = safe node.data;
+      let (value, left, right) = safe node.data!;
       Heap(rank, node) = left ++ right;
       Some(value)
     }
@@ -56,7 +56,7 @@ pub mod Heap[T; Ord[T]] {
     if rank == 0 {
       None()
     } else {
-      let &(value, _, _) = safe &node.data;
+      let &(value, _, _) = safe &node.data!;
       Some(&value)
     }
   }
@@ -69,7 +69,7 @@ pub mod Heap[T; Ord[T]] {
     rank
   }
 
-  fn .value[T](&Heap[T](_, safe Nullable::data(value, _, _))) -> &T {
+  fn .value[T](&Heap[T](_, safe Nullable::data(Box(value, _, _)))) -> &T {
     &value
   }
 
@@ -78,7 +78,7 @@ pub mod Heap[T; Ord[T]] {
     if rank == 0 {
       0
     } else {
-      let &(_, left, right) = safe &node.data;
+      let &(_, left, right) = safe &node.data!;
       1 + Heap::count(&left) + Heap::count(&right)
     }
   }
@@ -103,7 +103,7 @@ pub mod Heap[T; Ord[T]] {
       if self.value() > other.value() {
         swap(&self, &other);
       }
-      let &Heap(rank, safe Nullable::data(_, left, right)) = &self;
+      let &Heap(rank, safe Nullable::data(Box(_, left, right))) = &self;
       right ++= other;
       if right.rank() > left.rank() {
         swap(&left, &right);
@@ -119,8 +119,8 @@ pub mod Heap[T; Ord[T]] {
       if rank == 0 {
         Heap::empty
       } else {
-        let &(value, left, right) = safe &node.data;
-        Heap(rank, safe Nullable::data(value, left, right))
+        let &(value, left, right) = safe &node.data!;
+        Heap(rank, safe Nullable::data(Box(value, left, right)))
       }
     }
   }
@@ -131,7 +131,7 @@ pub mod Heap[T; Ord[T]] {
       if rank == 0 {
         safe node.null;
       } else {
-        safe node.data;
+        safe node.data!;
       }
     }
   }
@@ -224,7 +224,7 @@ pub mod Heap[T; Ord[T]] {
     if rank == 0 {
       []
     } else {
-      let &(value, left, right) = safe &node.data;
+      let &(value, left, right) = safe &node.data!;
       [value.show()] ++ left._show() ++ right._show()
     }
   }
