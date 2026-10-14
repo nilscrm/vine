@@ -81,6 +81,20 @@ impl<'a> Layouter<'a> {
     self.term_layout(term)
   }
 
+  /// The layouts of the variants of an enum type.
+  pub fn variant_layouts_of(
+    &mut self,
+    types: &Types,
+    ty: Type,
+    params: &[Term],
+  ) -> Result<Vec<Layout>, ErrorGuaranteed> {
+    let Term(LayoutKind::Enum(id), children) = self.type_term(types, ty, params)? else {
+      unreachable!("expected an enum")
+    };
+    let sig = &self.sigs.enums[id];
+    self.variant_layouts(&sig.types, sig.inner.variant_data.values(), &children)
+  }
+
   pub fn impl_tree_term(&self, tree: ImplTreeId) -> Result<Term, ErrorGuaranteed> {
     match &self.specs.impls[tree].kind {
       ImplTreeKind::Layout(kind, children) => Ok(Term(

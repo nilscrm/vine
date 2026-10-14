@@ -47,6 +47,8 @@ pub struct FramesEmitter<'a> {
   queued: HashSet<SpecId>,
   /// Blocks whose frames discard a value of a given size.
   discard: HashMap<u32, BlockId>,
+  /// Blocks whose frames write a value of a given size into a space.
+  write: HashMap<u32, BlockId>,
 }
 
 impl<'a> FramesEmitter<'a> {
@@ -87,6 +89,7 @@ impl<'a> FramesEmitter<'a> {
       queue: Vec::new(),
       queued: HashSet::new(),
       discard: HashMap::new(),
+      write: HashMap::new(),
     }
   }
 
@@ -167,6 +170,23 @@ impl<'a> FramesEmitter<'a> {
     let block =
       self.program.blocks.push(Block { unit, entry: Label(0), frame: (0..len).map(Reg).collect() });
     self.discard.insert(len, block);
+    block
+  }
+
+  /// Returns a block whose frames receive a space, and a value of `len`
+  /// words, and write the value into the space.
+  pub(crate) fn write_block(&mut self, len: u32) -> BlockId {
+    if let Some(&block) = self.write.get(&len) {
+      return block;
+    }
+    let code = vec![Instr::Write { space: Reg(0), src: Reg(1), len }, Instr::End];
+    let unit = self.program.units.push(Unit { name: "write".into(), regs: len + 1, code });
+    let block = self.program.blocks.push(Block {
+      unit,
+      entry: Label(0),
+      frame: (0..len + 1).map(Reg).collect(),
+    });
+    self.write.insert(len, block);
     block
   }
 

@@ -86,6 +86,10 @@ enum LocalState {
   /// The local's value is the value another local has when the current scope
   /// ends.
   AtEnd(Local),
+  /// The local's value will be supplied to the hole in this register (e.g.
+  /// by a closure which captured the local). The hole is only read once the
+  /// value is needed, so that waiting for it doesn't hold up other code.
+  Hole(Reg),
 }
 
 /// The state inherited from the stage which transferred into a layer.
@@ -95,7 +99,28 @@ struct Context {
   outer: Vec<(Reg, u32)>,
   locals: IdxVec<Local, LocalState>,
   /// Spaces to write locals' final values into when the scope ends.
-  at_end: Vec<(Local, Reg)>,
+  at_end: Vec<(Local, AtEnd)>,
+  /// The space the entry point's result is written into.
+  ret_space: Option<Reg>,
+  /// The entry point's result.
+  result: Option<(WireKey, Port)>,
+  /// Locals which are not part of the stage's interface, but are outputs of
+  /// an earlier stage which transferred to it, and must be preserved until
+  /// control returns.
+  preserved: Vec<Local>,
+}
+
+impl Context {
+  fn new(locals: usize) -> Self {
+    Context {
+      outer: Vec::new(),
+      locals: IdxVec::from_iter((0..locals).map(|_| LocalState::Empty)),
+      at_end: Vec::new(),
+      ret_space: None,
+      result: None,
+      preserved: Vec::new(),
+    }
+  }
 }
 
 struct Cont {
@@ -163,6 +188,7 @@ pub(super) fn emit_unit(
     temps: Vec::new(),
     ret_space: None,
     result: None,
+    preserved: Vec::new(),
     at_end: Vec::new(),
     stage_labels: HashMap::new(),
     fixups: Vec::new(),
@@ -215,8 +241,9 @@ struct UnitBuilder<'e, 'a> {
   ret_space: Option<Reg>,
   /// The header's result, written when the fragment returns.
   result: Option<(WireKey, Port)>,
+  preserved: Vec<Local>,
   /// Spaces to write locals' final values into when the current scope ends.
-  at_end: Vec<(Local, Reg)>,
+  at_end: Vec<(Local, AtEnd)>,
 
   stage_labels: HashMap<StageId, Label>,
   fixups: Vec<(usize, usize, Fixup)>,
@@ -236,12 +263,11 @@ impl UnitBuilder<'_, '_> {
     if !self.compute_returns() {
       return;
     }
-    let context = Context {
-      outer: Vec::new(),
-      locals: IdxVec::from_iter(self.vir.locals.keys().map(|_| LocalState::Empty)),
-      at_end: Vec::new(),
-    };
-    self.queue.push((StageId(0), context));
+    // The fragment is entered at its first stage, and at the stages of its
+    // closures.
+    for stage in self.roots() {
+      self.queue.push((stage, Context::new(self.vir.locals.len())));
+    }
     while let Some((stage, context)) = self.queue.pop() {
       if !self.stage_labels.contains_key(&stage) {
         self.emit_stage(stage, &context);
@@ -256,9 +282,21 @@ impl UnitBuilder<'_, '_> {
     }
   }
 
+  /// The stages the unit is entered at.
+  fn roots(&self) -> Vec<StageId> {
+    let mut roots = vec![StageId(0)];
+    for (_, interface) in self.vir.interfaces.iter() {
+      if let InterfaceKind::Closure { .. } = interface.kind {
+        roots.extend(interface.kind.stages());
+      }
+    }
+    roots
+  }
+
   /// Determines where each stage returns to, which must be unique.
   fn compute_returns(&mut self) -> bool {
-    let mut queue = vec![(StageId(0), ReturnPoint::Fragment)];
+    let mut queue =
+      self.roots().into_iter().map(|stage| (stage, ReturnPoint::Fragment)).collect::<Vec<_>>();
     while let Some((stage_id, point)) = queue.pop() {
       if let Some(&existing) = self.returns.get(&stage_id) {
         if existing != point {
@@ -270,7 +308,9 @@ impl UnitBuilder<'_, '_> {
       self.returns.insert(stage_id, point);
       let steps = &self.vir.stages[stage_id].steps;
       for (index, step) in steps.iter().enumerate() {
-        if let Step::Transfer(transfer) = step {
+        if let Step::Transfer(transfer) = step
+          && !creates_value(&self.vir.interfaces[transfer.interface].kind)
+        {
           let target_point =
             if index + 1 == steps.len() { point } else { ReturnPoint::After(stage_id, index) };
           for target in self.vir.interfaces[transfer.interface].kind.stages() {
@@ -290,6 +330,9 @@ impl UnitBuilder<'_, '_> {
     self.outer = context.outer.clone();
     self.locals = context.locals.clone();
     self.at_end = context.at_end.clone();
+    self.ret_space = context.ret_space;
+    self.result = context.result.clone();
+    self.preserved = context.preserved.clone();
     debug_assert!(self.cont.is_none() && self.pending.is_empty());
 
     let interface = &self.vir.interfaces[stage.interface];
@@ -308,14 +351,16 @@ impl UnitBuilder<'_, '_> {
         break;
       }
       self.step = index;
-      if !self.ready(step) {
+      if moves_data(step) {
         deferred.push((index, step));
+        self.emit_deferred(&mut deferred, false);
         continue;
       }
+      self.emit_deferred(&mut deferred, true);
       self.emit_step(index, step);
-      self.emit_deferred(&mut deferred);
+      self.emit_deferred(&mut deferred, false);
     }
-    self.emit_deferred(&mut deferred);
+    self.emit_deferred(&mut deferred, true);
     if let Some(&(index, step)) = deferred.first() {
       self.step = index;
       if env::var("FRAMES_DEBUG").is_ok() {
@@ -341,23 +386,34 @@ impl UnitBuilder<'_, '_> {
       Header::Bare => {}
       Header::Fn(params, result) => {
         let mut map = Vec::new();
-        for param in params {
-          let info = self.port_info(param);
-          if info.layout.size == 0 {
-            continue;
-          }
-          if info.writer {
-            let reg = self.alloc(info.layout.size);
-            map.extend((0..info.layout.size).map(|i| reg.offset(i)));
-            self.set_wire(info.key.unwrap(), WireState::Value(reg, info.layout.size));
-          } else {
-            let space = self.alloc(1);
-            map.push(space);
-            self.wire_reader_space(param, space);
-          }
-        }
+        self.header_params(params, &mut map);
         self.header_result(result, &mut map);
         self.entries.push((stage_id, label, map));
+      }
+      // A closure is called, forked, or dropped with the closure as the first
+      // argument.
+      Header::Closure(params, result) => {
+        let closure = self.alloc(1);
+        let mut map = vec![closure];
+        self.header_params(params, &mut map);
+        self.header_result(result, &mut map);
+        self.entries.push((stage_id, label, map));
+        self.open_closure(stage.interface, closure);
+      }
+      Header::Fork(former, latter) => {
+        // `fork(&self) -> Self`; the stage creates two closures, the latter of
+        // which is written back into the reference.
+        let regs = self.alloc(3);
+        let map = vec![regs, regs.offset(1), regs.offset(2)];
+        self.entries.push((stage_id, label, map));
+        self.wire_reader_space(latter, regs.offset(1));
+        self.wire_reader_space(former, regs.offset(2));
+        self.open_closure(stage.interface, regs);
+      }
+      Header::Drop => {
+        let closure = self.alloc(1);
+        self.entries.push((stage_id, label, vec![closure]));
+        self.open_closure(stage.interface, closure);
       }
       Header::Const(result) => {
         let mut map = Vec::new();
@@ -377,6 +433,24 @@ impl UnitBuilder<'_, '_> {
     }
   }
 
+  fn header_params(&mut self, params: &[Port], map: &mut Vec<Reg>) {
+    for param in params {
+      let info = self.port_info(param);
+      if info.layout.size == 0 {
+        continue;
+      }
+      if info.writer {
+        let reg = self.alloc(info.layout.size);
+        map.extend((0..info.layout.size).map(|i| reg.offset(i)));
+        self.set_wire(info.key.unwrap(), WireState::Value(reg, info.layout.size));
+      } else {
+        let space = self.alloc(1);
+        map.push(space);
+        self.wire_reader_space(param, space);
+      }
+    }
+  }
+
   fn header_result(&mut self, result: &Port, map: &mut Vec<Reg>) {
     let info = self.port_info(result);
     if info.layout.size != 0 {
@@ -384,8 +458,15 @@ impl UnitBuilder<'_, '_> {
       map.push(space);
       self.ret_space = Some(space);
     }
-    if let Some(key) = info.key {
-      self.result = Some((key, result.clone()));
+    match info.key {
+      Some(key) => self.result = Some((key, result.clone())),
+      None if info.layout.size != 0 => {
+        // A constant; it is returned immediately.
+        let value = self.read_value(result);
+        let space = self.ret_space.take().unwrap();
+        self.write_back(space, value);
+      }
+      None => {}
     }
   }
 
@@ -423,6 +504,7 @@ impl UnitBuilder<'_, '_> {
           match interface.wires.get(&local) {
             Some(&(_, _, true)) => _ = self.local_value(local),
             Some(_) => self.drop_local(local),
+            None if self.preserved.contains(&local) => _ = self.local_value(local),
             None => {}
           }
         }
@@ -434,12 +516,40 @@ impl UnitBuilder<'_, '_> {
     self.stage_ended = true;
   }
 
-  fn emit_deferred(&mut self, deferred: &mut Vec<(usize, &Step)>) {
-    while let Some(i) = deferred.iter().position(|(_, step)| self.ready(step)) {
+  /// Emits deferred steps whose inputs are available. Steps which are not
+  /// settled are only emitted if `unsettled` is true, as they would wait
+  /// for values unnecessarily.
+  fn emit_deferred(&mut self, deferred: &mut Vec<(usize, &Step)>, unsettled: bool) {
+    loop {
+      let mut found = deferred.iter().position(|(_, step)| self.ready(step) && self.settled(step));
+      if found.is_none() && unsettled {
+        found = deferred.iter().position(|(_, step)| self.ready(step));
+      }
+      let Some(i) = found else { break };
       let (index, step) = deferred.remove(i);
       self.step = index;
       self.emit_step(index, step);
     }
+  }
+
+  /// Whether the readers of the fields a step produces spaces for are known;
+  /// otherwise, the spaces would point into the continuation frame, and later
+  /// code would wait for their values.
+  fn settled(&mut self, step: &Step) -> bool {
+    let fields: Vec<&Port> = match step {
+      Step::Composite(port, fields) if self.port_info(port).writer => fields.iter().collect(),
+      Step::Ref(reference, value, space) if self.port_info(reference).writer => {
+        vec![value, space]
+      }
+      _ => return true,
+    };
+    fields.into_iter().all(|port| {
+      let info = self.port_info(port);
+      match info.key {
+        Some(key) => !info.writer || info.layout.size == 0 || self.wires.contains_key(&key),
+        None => true,
+      }
+    })
   }
 
   /// Whether a step which only moves data has its inputs available; other
@@ -453,9 +563,9 @@ impl UnitBuilder<'_, '_> {
           vec![port]
         }
       }
-      Step::Ref(reference, value, _) => {
+      Step::Ref(reference, value, space) => {
         if self.port_info(reference).writer {
-          if self.port_info(value).writer { vec![] } else { vec![value] }
+          [value, space].into_iter().filter(|p| !self.port_info(p).writer).collect()
         } else {
           vec![reference]
         }
@@ -477,17 +587,58 @@ impl UnitBuilder<'_, '_> {
 
   /// Writes locals' final values into the spaces waiting for them.
   fn emit_at_end(&mut self) {
-    // Each entry stays in `at_end` until it has been written, so that its
-    // space is preserved if writing it waits for the value.
-    while let Some(&(local, space)) = self.at_end.first() {
-      if let Some(local) = self.final_local(local) {
-        let (reg, len) = self.local_value(local);
-        self.require(reg, len);
-        self.locals[local] = LocalState::Empty;
-        self.write_back(space, (reg, len));
-      }
-      self.at_end.remove(0);
+    while !self.at_end.is_empty() {
+      self.emit_at_end_entry(0);
     }
+  }
+
+  /// Writes the final values of locals for which `keep` is false, as their
+  /// scope ends.
+  fn emit_at_end_except(&mut self, keep: impl Fn(&Self, Local) -> bool) {
+    let mut i = 0;
+    while i < self.at_end.len() {
+      let mut local = self.at_end[i].0;
+      while let LocalState::AtEnd(other) = self.locals[local] {
+        local = other;
+      }
+      if self.locals[local] == LocalState::Empty || keep(self, local) {
+        i += 1;
+      } else {
+        self.emit_at_end_entry(i);
+      }
+    }
+  }
+
+  /// Writes a local's final value as the `at_end` entry at `index` says, and
+  /// removes the entry. It stays in `at_end` until then, so that its register
+  /// is preserved if this waits.
+  fn emit_at_end_entry(&mut self, index: usize) {
+    let (local, action) = self.at_end[index];
+    if let Some(local) = self.final_local(local) {
+      match (action, self.locals[local]) {
+        (AtEnd::Forward(hole, len), _) => {
+          // The local's final value is a space, which the hole's value is
+          // forwarded into.
+          let (space, _) = self.local_value(local);
+          self.require(space, 1);
+          self.materialize(space);
+          self.locals[local] = LocalState::Empty;
+          self.code.push(Instr::HoleForward { hole, space, len });
+        }
+        (AtEnd::Write(space), LocalState::Hole(hole)) => {
+          let (_, len) = self.local_regs(local);
+          self.locals[local] = LocalState::Empty;
+          self.materialize(space);
+          self.code.push(Instr::HoleForward { hole, space, len });
+        }
+        (AtEnd::Write(space), _) => {
+          let (reg, len) = self.local_value(local);
+          self.locals[local] = LocalState::Empty;
+          self.write_back(space, (reg, len));
+        }
+      }
+    }
+    self.at_end.remove(index);
   }
 
   /// Records that `local`'s value is `other`'s final value; spaces waiting
@@ -531,9 +682,7 @@ impl UnitBuilder<'_, '_> {
       Step::Call(span, rel, args, ret) => self.emit_call(*span, *rel, args, ret),
       Step::Const(span, rel, port) => self.emit_const(*span, *rel, port),
       Step::Composite(port, fields) => self.emit_composite(port, fields),
-      Step::Ref(reference, value, space) => {
-        self.emit_composite(reference, &[value.clone(), space.clone()])
-      }
+      Step::Ref(reference, value, space) => self.emit_ref(reference, value, space),
       Step::Enum(_, variant, port, data) => {
         let info = self.port_info(port);
         let data = self.read_value(data);
@@ -606,6 +755,12 @@ impl UnitBuilder<'_, '_> {
   /// pending).
   fn local_value(&mut self, local: Local) -> (Reg, u32) {
     let regs = self.local_regs(local);
+    if let LocalState::Hole(hole) = self.locals[local] {
+      let space = self.pending_space(regs.0, regs.1);
+      self.materialize_cont(space);
+      self.code.push(Instr::HoleForward { hole, space, len: regs.1 });
+      self.locals[local] = LocalState::Valid;
+    }
     if let LocalState::AtEnd(_) = self.locals[local] {
       self.unsupported("a value used before it is computed".into());
       self.locals[local] = LocalState::Valid;
@@ -665,7 +820,16 @@ impl UnitBuilder<'_, '_> {
     if self.locals[local] == LocalState::Empty {
       // The local is read before it is written; this reads the value it has
       // when the current scope ends.
-      if let Some(key) = info.key {
+      if !info.writer {
+        // The local holds a space, which the wire's value is written into;
+        // the value is held in a hole until then.
+        let hole = self.alloc(1);
+        self.code.push(Instr::HoleNew { dst: hole, len: info.layout.size });
+        let space = self.alloc(1);
+        self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
+        self.wire_reader_space(port, space);
+        self.at_end.push((local, AtEnd::Forward(hole, info.layout.size)));
+      } else if let Some(key) = info.key {
         self.set_wire(key, WireState::LocalAtEnd(local));
       }
       return;
@@ -740,7 +904,18 @@ impl UnitBuilder<'_, '_> {
       LocalState::Empty => {}
       // The value is owned by the other local.
       LocalState::AtEnd(_) => self.locals[local] = LocalState::Empty,
-      LocalState::Alias(_) | LocalState::Valid => {
+      LocalState::Hole(hole) if self.vir.locals[local].drop.is_none() => {
+        // Nothing needs to be done with the value once it arrives.
+        self.locals[local] = LocalState::Empty;
+        let (_, len) = self.local_regs(local);
+        let block = self.e.discard_block(len);
+        let frame = self.alloc(1);
+        self.code.push(Instr::NewFrame { dst: frame, block });
+        let space = self.alloc(1);
+        self.code.push(Instr::Space { dst: space, frame, offset: 1 });
+        self.code.push(Instr::HoleForward { hole, space, len });
+      }
+      LocalState::Alias(_) | LocalState::Valid | LocalState::Hole(_) => {
         let (reg, len) = self.local_value(local);
         self.locals[local] = LocalState::Empty;
         if len == 0 {
@@ -767,6 +942,22 @@ impl UnitBuilder<'_, '_> {
     copy
   }
 
+  /// Whether the local has its final value: it has a value, and is not
+  /// changed by the rest of the stage.
+  fn is_final(&self, local: Local) -> bool {
+    if !matches!(self.locals[local], LocalState::Valid | LocalState::Alias(_)) {
+      return false;
+    }
+    let stage = &self.vir.stages[self.stage];
+    stage.steps.iter().skip(self.step + 1).all(|step| match step {
+      Step::Invoke(_, l, _) => *l != local,
+      Step::Transfer(transfer) => {
+        !self.vir.interfaces[transfer.interface].wires.contains_key(&local)
+      }
+      _ => true,
+    })
+  }
+
   /// Whether the local's current value is used after the step at `index`.
   fn used_later(&self, index: usize, local: Local) -> bool {
     let stage = &self.vir.stages[self.stage];
@@ -788,13 +979,21 @@ impl UnitBuilder<'_, '_> {
               return false;
             }
           }
-          if index + 1 == stage.steps.len() {
+          if index + 1 == stage.steps.len() && !creates_value(&interface.kind) {
             // A final transfer; the stage ends here.
             return false;
           }
         }
         _ => {}
       }
+    }
+    // Its final value is read.
+    if self.at_end.iter().any(|&(l, _)| l == local)
+      || self.wires.iter().any(|(key, state)| {
+        key.0 == self.stage && matches!(state, WireState::LocalAtEnd(l) if *l == local)
+      })
+    {
+      return true;
     }
     let interface = &self.vir.interfaces[stage.interface];
     matches!(interface.wires.get(&local), Some(&(_, _, true)))
@@ -804,6 +1003,11 @@ impl UnitBuilder<'_, '_> {
 
   fn emit_transfer(&mut self, index: usize, transfer: &Transfer) {
     let interface = &self.vir.interfaces[transfer.interface];
+    match interface.kind {
+      InterfaceKind::Closure { .. } => return self.emit_closure(index, transfer),
+      InterfaceKind::Inspect(_) => return self.unsupported("inspect".into()),
+      _ => {}
+    }
     let stage = &self.vir.stages[self.stage];
     let child = index + 1 != stage.steps.len();
 
@@ -815,10 +1019,24 @@ impl UnitBuilder<'_, '_> {
         self.local_value(local);
       }
     }
+    let mut preserved = Vec::new();
     if !child {
-      // The stage ends here; drop any other locals.
+      // The stage ends here. Locals the target takes are passed on; outputs
+      // of this stage's interface are preserved, until control returns. The
+      // scopes of other locals end.
+      let own = &self.vir.interfaces[stage.interface];
+      preserved = self.preserved.clone();
+      for (&local, &(_, _, output)) in &own.wires {
+        if output && !matches!(interface.wires.get(&local), Some(&(true, _, _))) {
+          preserved.push(local);
+        }
+      }
+      let keep = |local: Local| {
+        matches!(interface.wires.get(&local), Some(&(true, _, _))) || preserved.contains(&local)
+      };
+      self.emit_at_end_except(|_, local| keep(local));
       for local in self.locals.keys().collect::<Vec<_>>() {
-        if !matches!(interface.wires.get(&local), Some(&(true, _, _))) {
+        if !keep(local) {
           self.drop_local(local);
         }
       }
@@ -849,26 +1067,34 @@ impl UnitBuilder<'_, '_> {
       let mut outer = self.outer.clone();
       outer.extend(self.live_wires());
       outer.extend(self.ret_space.map(|r| (r, 1)));
-      outer.extend(self.at_end.iter().map(|&(_, space)| (space, 1)));
-      let mut locals = self.locals.clone();
-      for (&local, &(input, _, _)) in &interface.wires {
-        if input {
-          locals[local] = LocalState::Empty;
-        }
-      }
+      outer.extend(self.at_end.iter().map(|&(_, action)| (action.reg(), 1)));
+      // The child only sees the locals of its interface; the others stay with
+      // this stage.
+      let locals = IdxVec::from_iter(self.locals.keys().map(|_| LocalState::Empty));
       let valid = self.locals.iter().filter(|&(local, &state)| {
         state == LocalState::Valid && !matches!(interface.wires.get(&local), Some(&(true, _, _)))
       });
       for local in valid.map(|(l, _)| l).collect::<Vec<_>>() {
         outer.push(self.local_regs(local));
       }
+      outer.extend(self.hole_locals());
       outer.extend(kept.iter().map(|&(_, copy, len)| (copy, len)));
-      Context { outer, locals, at_end: Vec::new() }
+      Context {
+        outer,
+        locals,
+        at_end: Vec::new(),
+        ret_space: self.ret_space,
+        result: self.result.clone(),
+        preserved: Vec::new(),
+      }
     } else {
       Context {
         outer: self.outer.clone(),
         locals: self.locals.clone(),
         at_end: self.at_end.clone(),
+        ret_space: self.ret_space,
+        result: self.result.clone(),
+        preserved,
       }
     };
     for target in interface.kind.stages() {
@@ -923,6 +1149,118 @@ impl UnitBuilder<'_, '_> {
     self.code.push(Instr::Jump { target: Label(0) });
   }
 
+  // Closures
+
+  /// The words of the environment of a closure: for each local the closure's
+  /// stages take as input, its value; for each local they output, a space for
+  /// its final value.
+  fn closure_env(&mut self, interface: InterfaceId) -> Vec<(Local, EnvWords)> {
+    let mut env = Vec::new();
+    for (&local, &(input, _, output)) in &self.vir.interfaces[interface].wires {
+      let (_, len) = self.local_regs(local);
+      if len == 0 {
+        continue;
+      }
+      if input {
+        env.push((local, EnvWords::Value(len)));
+      }
+      if output {
+        env.push((local, EnvWords::Space));
+      }
+    }
+    env
+  }
+
+  /// Creates a closure: a hole holding its environment.
+  fn emit_closure(&mut self, index: usize, transfer: &Transfer) {
+    let interface = &self.vir.interfaces[transfer.interface];
+    let env = self.closure_env(transfer.interface);
+    let size = env.iter().map(|(_, words)| words.len()).sum::<u32>();
+    let closure = self.alloc(1);
+    if size == 0 {
+      self.code.push(Instr::Const { dst: closure, value: 0 });
+    } else {
+      let regs = self.alloc(size);
+      let mut offset = 0;
+      for &(local, words) in &env {
+        let dst = regs.offset(offset);
+        match words {
+          EnvWords::Value(len) => {
+            if self.locals[local] == LocalState::Empty {
+              self.unsupported("a local read before it is written".into());
+            } else {
+              let (_, barrier, output) = interface.wires[&local];
+              if !barrier && !output && self.used_later(index, local) {
+                let copy = self.fork(Span::NONE, local);
+                self.move_regs(dst, copy, len);
+              } else {
+                let (reg, _) = self.local_value(local);
+                self.locals[local] = LocalState::Empty;
+                self.move_regs(dst, reg, len);
+              }
+            }
+          }
+          EnvWords::Space => {
+            // The local's final value is written back by the closure, into a
+            // hole.
+            let (_, len) = self.local_regs(local);
+            let hole = self.alloc(1);
+            self.code.push(Instr::HoleNew { dst: hole, len });
+            self.code.push(Instr::Space { dst, frame: hole, offset: 1 });
+            self.locals[local] = LocalState::Hole(hole);
+          }
+        }
+        offset += words.len();
+      }
+      self.temps.push((regs, size));
+      self.require(regs, size);
+      self.code.push(Instr::HoleOf { dst: closure, src: regs, len: size });
+    }
+    if let Some(data) = &transfer.data {
+      self.write_value(data, closure, 1);
+    }
+  }
+
+  /// Takes a closure's environment, at the start of one of its stages; its
+  /// values become the values of locals, and its spaces receive the final
+  /// values of locals.
+  fn open_closure(&mut self, interface: InterfaceId, closure: Reg) {
+    let env = self.closure_env(interface);
+    let size = env.iter().map(|(_, words)| words.len()).sum::<u32>();
+    if size == 0 {
+      return;
+    }
+    for &(local, _) in &env {
+      self.locals[local] = LocalState::Empty;
+    }
+    let regs = self.alloc(size);
+    let ok = self.alloc(1);
+    self.code.push(Instr::HoleTake { hole: closure, dst: regs, len: size, ok });
+    let branch = self.code.len();
+    self.code.push(Instr::Branch { cond: ok, then: Label(0), else_: Label(branch as u32 + 1) });
+    // The environment is not complete yet; wait for it.
+    let space = self.pending_space(regs, size);
+    self.materialize(space);
+    self.code.push(Instr::HoleForward { hole: closure, space, len: size });
+    self.suspend();
+    let resume = self.label();
+    set_target(&mut self.code[branch], 0, resume);
+
+    let mut offset = 0;
+    for (local, words) in env {
+      let src = regs.offset(offset);
+      match words {
+        EnvWords::Value(len) => {
+          let (reg, _) = self.local_regs(local);
+          self.move_regs(reg, src, len);
+          self.locals[local] = LocalState::Valid;
+        }
+        EnvWords::Space => self.at_end.push((local, AtEnd::Write(src))),
+      }
+      offset += words.len();
+    }
+  }
+
   // Calls
 
   fn emit_call(&mut self, span: Span, rel: FnRelId, args: &[Port], ret: &Port) {
@@ -932,7 +1270,7 @@ impl UnitBuilder<'_, '_> {
     }
     if let SpecKind::Synthetic(item) = &self.e.specs.spec(callee).kind {
       let item = item.clone();
-      return self.emit_synthetic(&item, args, ret);
+      return self.emit_synthetic(span, callee, &item, args, ret);
     }
     let args = args.iter().map(|arg| CallArg::Port(arg.clone())).collect();
     let ret_info = self.port_info(ret);
@@ -960,7 +1298,7 @@ impl UnitBuilder<'_, '_> {
         Ok(x) => x,
         Err(_) => return,
       },
-      CallTarget::Const(spec) => (spec, StageId(0)),
+      CallTarget::Spec(spec, stage) => (spec, stage),
     };
     // Gather the arguments' values before allocating the frame, as this may
     // suspend.
@@ -980,12 +1318,12 @@ impl UnitBuilder<'_, '_> {
             ArgWords::Forward(port.clone(), info.layout.size)
           } else {
             let (reg, len) = self.read_value(port);
-            self.require(reg, len);
+            self.require_filled(reg, len);
             ArgWords::Regs(reg, len)
           }
         }
         CallArg::Regs(reg, len) => {
-          self.require(*reg, *len);
+          self.require_filled(*reg, *len);
           ArgWords::Regs(*reg, *len)
         }
         CallArg::Ref(reg, len) => {
@@ -1035,16 +1373,27 @@ impl UnitBuilder<'_, '_> {
 
   fn emit_const(&mut self, span: Span, rel: ConstRelId, port: &Port) {
     let Ok(callee) = self.e.specs.spec(self.spec_id).rels.consts[rel] else { return };
+    self.emit_const_spec(span, callee, port);
+  }
+
+  fn emit_const_spec(&mut self, span: Span, callee: SpecId, port: &Port) {
     if let SpecKind::Synthetic(item) = &self.e.specs.spec(callee).kind {
       let item = item.clone();
-      return self.emit_synthetic(&item, &[], port);
+      return self.emit_synthetic(span, callee, &item, &[], port);
     }
     let info = self.port_info(port);
     let ret = (info.layout.size != 0).then(|| CallRet::Port(port.clone()));
-    self.call(span, CallTarget::Const(callee), vec![], ret);
+    self.call(span, CallTarget::Spec(callee, StageId(0)), vec![], ret);
   }
 
-  fn emit_synthetic(&mut self, item: &SyntheticItem, args: &[Port], ret: &Port) {
+  fn emit_synthetic(
+    &mut self,
+    span: Span,
+    spec: SpecId,
+    item: &SyntheticItem,
+    args: &[Port],
+    ret: &Port,
+  ) {
     match item {
       SyntheticItem::N32(n) => {
         let reg = self.alloc(1);
@@ -1068,8 +1417,127 @@ impl UnitBuilder<'_, '_> {
         let (reg, len) = self.read_value(&args[0]);
         self.write_value(ret, reg, len);
       }
-      item => self.unsupported(format!("{item:?}")),
+      SyntheticItem::String(string) => {
+        let list = self.build_list(1, string.chars().map(ListPart::Char).collect());
+        self.write_value(ret, list, 3);
+      }
+      SyntheticItem::EnumVariantNames(enum_id) => {
+        let names = self.e.chart.enums[*enum_id].variants.values().map(|v| v.name.0.clone());
+        let names = names.collect::<Vec<_>>();
+        let parts = names
+          .iter()
+          .map(|name| {
+            ListPart::Value((self.build_list(1, name.chars().map(ListPart::Char).collect()), 3))
+          })
+          .collect();
+        let list = self.build_list(3, parts);
+        self.write_value(ret, list, 3);
+      }
+      SyntheticItem::ConstAlias(_) => {
+        let Ok(target) = self.e.specs.spec(spec).rels.consts[ConstRelId(0)] else { return };
+        self.emit_const_spec(span, target, ret);
+      }
+      SyntheticItem::CallFn(..) => {
+        // `call(f, (params...)) -> ret`, where `f` is empty; the parameters
+        // are passed on as they are.
+        let Ok((target, stage)) = self.e.specs.spec(spec).rels.fns[FnRelId(0)] else { return };
+        if self.e.intrinsic(target).is_some()
+          || matches!(self.e.specs.spec(target).kind, SpecKind::Synthetic(_))
+        {
+          return self.unsupported("calling an intrinsic or synthetic function value".into());
+        }
+        let args = args.iter().map(|arg| CallArg::Port(arg.clone())).collect();
+        let ret_info = self.port_info(ret);
+        let ret = (ret_info.layout.size != 0).then(|| CallRet::Port(ret.clone()));
+        self.call(span, CallTarget::Spec(target, stage), args, ret);
+      }
+      SyntheticItem::EnumDeconstruct(_) => {
+        // `Rest(...Rest(Init(content)))`, with as many `Rest`s as the
+        // variant's index.
+        let info = self.port_info(&args[0]);
+        let variants = self.variant_layouts(info.ty);
+        let (src, len) = self.read_value(&args[0]);
+        self.require(src, len);
+        let size = self.port_info(ret).layout.size;
+        let out = self.alloc(size);
+        let switch = self.code.len();
+        self.code.push(Instr::Switch { tag: src, targets: vec![] });
+        let mut ends = Vec::new();
+        for (index, variant) in variants.iter().enumerate() {
+          let label = self.label();
+          let Instr::Switch { targets, .. } = &mut self.code[switch] else { unreachable!() };
+          targets.push(label);
+          let index = index as u32;
+          for i in 0..index {
+            self.code.push(Instr::Const { dst: out.offset(i), value: 1 });
+          }
+          self.code.push(Instr::Const { dst: out.offset(index), value: 0 });
+          self.code.push(Instr::Move {
+            dst: out.offset(index + 1),
+            src: src.offset(1),
+            len: variant.size,
+          });
+          for i in index + 1 + variant.size..size {
+            self.code.push(Instr::Const { dst: out.offset(i), value: 0 });
+          }
+          ends.push(self.code.len());
+          self.code.push(Instr::Jump { target: Label(0) });
+        }
+        let end = self.label();
+        for index in ends {
+          set_target(&mut self.code[index], 0, end);
+        }
+        self.write_value(ret, out, size);
+      }
+      SyntheticItem::EnumReconstruct(_) => {
+        let info = self.port_info(ret);
+        let variants = self.variant_layouts(info.ty);
+        let (src, len) = self.read_value(&args[0]);
+        self.require(src, len);
+        let size = info.layout.size;
+        let out = self.alloc(size);
+        let mut ends = Vec::new();
+        for (index, variant) in variants.iter().enumerate() {
+          let index = index as u32;
+          let branch = (index + 1 < variants.len() as u32).then(|| {
+            // A nonzero tag is `Rest`; the value is a later variant.
+            self.code.push(Instr::Branch {
+              cond: src.offset(index),
+              then: Label(0),
+              else_: Label(0),
+            });
+            let branch = self.code.len() - 1;
+            let label = self.label();
+            set_target(&mut self.code[branch], 1, label);
+            branch
+          });
+          self.code.push(Instr::Const { dst: out, value: index as u64 });
+          self.code.push(Instr::Move {
+            dst: out.offset(1),
+            src: src.offset(index + 1),
+            len: variant.size,
+          });
+          for i in 1 + variant.size..size {
+            self.code.push(Instr::Const { dst: out.offset(i), value: 0 });
+          }
+          ends.push(self.code.len());
+          self.code.push(Instr::Jump { target: Label(0) });
+          if let Some(branch) = branch {
+            let label = self.label();
+            set_target(&mut self.code[branch], 0, label);
+          }
+        }
+        let end = self.label();
+        for index in ends {
+          set_target(&mut self.code[index], 0, end);
+        }
+        self.write_value(ret, out, size);
+      }
     }
+  }
+
+  fn variant_layouts(&mut self, ty: Type) -> Vec<Layout> {
+    self.e.layouter.variant_layouts_of(&self.vir.types, ty, &self.params).unwrap_or_default()
   }
 
   fn emit_intrinsic(&mut self, span: Span, intrinsic: Intrinsic, args: &[Port], ret: &Port) {
@@ -1160,7 +1628,23 @@ impl UnitBuilder<'_, '_> {
         self.materialize(space);
         self.code.push(Instr::HoleForward { hole, space, len });
       }
-      HoleAsRef => self.unsupported("Hole::as_ref".into()),
+      HoleAsRef => {
+        // `as_ref(&Hole[T]) -> &T`; the value is borrowed from the hole, and
+        // put into a new hole once the borrow ends, which replaces the old one.
+        let (hole, hole_space) = self.read_ref(&args[0]);
+        self.require(hole.0, 1);
+        let size = self.port_info(ret).layout.size;
+        let len = size - 1;
+        let out = self.alloc(size);
+        let space = self.pending_space(out, len);
+        self.materialize(space);
+        self.code.push(Instr::HoleForward { hole: hole.0, space, len });
+        let new = self.alloc(1);
+        self.code.push(Instr::HoleNew { dst: new, len });
+        self.code.push(Instr::Space { dst: out.offset(len), frame: new, offset: 1 });
+        self.write_back(hole_space, (new, 1));
+        self.write_value(ret, out, size);
+      }
       _ => {
         let args = args.iter().collect::<Vec<_>>();
         self.emit_op(intrinsic.name(), &args, Some(ret));
@@ -1216,6 +1700,15 @@ impl UnitBuilder<'_, '_> {
   /// `Stream` node is a value, followed by a `Hole` for the rest of the
   /// stream.
   fn build_list(&mut self, element_size: u32, parts: Vec<ListPart>) -> Reg {
+    // Wait for the parts first, as registers allocated below are not
+    // preserved by waiting.
+    for part in &parts {
+      match *part {
+        ListPart::Value((reg, len)) => self.require(reg, len),
+        ListPart::List(reg) => self.require(reg, 3),
+        ListPart::Char(_) => {}
+      }
+    }
     let node_size = element_size + 1;
     let list = self.alloc(3);
     let mut count = 0;
@@ -1241,7 +1734,6 @@ impl UnitBuilder<'_, '_> {
         ListPart::List(other) => {
           // Splice in another list: forward its front into the tail, and
           // continue from its back.
-          self.require(other, 3);
           self.code.push(Instr::HoleForward { hole: other.offset(1), space: tail, len: node_size });
           lists.push(other);
           tail = other.offset(2);
@@ -1329,6 +1821,52 @@ impl UnitBuilder<'_, '_> {
     }
   }
 
+  /// A reference is its value, followed by a space for its value afterwards.
+  fn emit_ref(&mut self, reference: &Port, value: &Port, space: &Port) {
+    let info = self.port_info(reference);
+    let space_info = self.port_info(space);
+    if space_info.writer == info.writer || space_info.layout.size == 0 {
+      return self.emit_composite(reference, &[value.clone(), space.clone()]);
+    }
+    // The referenced type is itself a space, `~T`; the space port carries a
+    // `T`, while the reference's last word is a space for a space for a `T`.
+    let len = space_info.layout.size;
+    if info.writer {
+      let reg = self.alloc(2);
+      let value_space = self.wire_space(value);
+      self.move_regs(reg, value_space, 1);
+      let (src, src_len) = self.read_value(space);
+      if self.virtual_run(src, src_len) == Some(len) {
+        // The `T` is written through a virtual space; the space it is written
+        // through will be written into the reference's space instead.
+        let (virtual_space, _) = self.unwritten[&src];
+        for i in 0..len {
+          self.unwritten.remove(&src.offset(i));
+        }
+        self.virtual_spaces.remove(&virtual_space);
+        let space = self.pending_space(virtual_space, 1);
+        self.move_regs(reg.offset(1), space, 1);
+      } else {
+        // Once the space is written, write the `T` into it.
+        self.require_filled(src, src_len);
+        let block = self.e.write_block(len);
+        let frame = self.alloc(1);
+        self.code.push(Instr::NewFrame { dst: frame, block });
+        self.emit_fill(frame, 2, src, len);
+        self.code.push(Instr::Space { dst: reg.offset(1), frame, offset: 1 });
+      }
+      self.write_value(reference, reg, 2);
+    } else {
+      let (reg, _) = self.read_value(reference);
+      self.wire_reader_space(value, reg);
+      // Write a space for the `T` into the reference's space.
+      let out = self.alloc(len);
+      let out_space = self.pending_space(out, len);
+      self.emit_write(reg.offset(1), out_space, 1);
+      self.write_value(space, out, len);
+    }
+  }
+
   fn emit_link(&mut self, a: &Port, b: &Port) {
     let (writer, reader) = if self.port_info(a).writer { (a, b) } else { (b, a) };
     let info = self.port_info(writer);
@@ -1343,7 +1881,7 @@ impl UnitBuilder<'_, '_> {
       let writer_key = info.key.unwrap();
       let state = match self.wires.get(&writer_key).copied() {
         Some(WireState::ReaderSpace(space)) => {
-          self.at_end.push((local, space));
+          self.at_end.push((local, AtEnd::Write(space)));
           WireState::Consumed
         }
         Some(WireState::ReaderLocal(other)) => {
@@ -1444,10 +1982,18 @@ impl UnitBuilder<'_, '_> {
       }
       Some(WireState::LocalAtEnd(local)) => {
         self.wires.insert(key, WireState::Consumed);
-        let (reg, len) = self.local_value(local);
-        self.locals[local] = LocalState::Empty;
-        self.temps.push((reg, len));
-        (reg, len)
+        if self.is_final(local) {
+          let (reg, len) = self.local_value(local);
+          self.locals[local] = LocalState::Empty;
+          self.temps.push((reg, len));
+          (reg, len)
+        } else {
+          // The local's final value will be written into these registers.
+          let reg = self.alloc(size);
+          let space = self.pending_space(reg, size);
+          self.at_end.push((local, AtEnd::Write(space)));
+          (reg, size)
+        }
       }
       _ => {
         self.unsupported("a value used before it is computed".into());
@@ -1483,7 +2029,7 @@ impl UnitBuilder<'_, '_> {
       None => self.wire_reader_space(port, space),
       Some(WireState::LocalAtEnd(local)) => {
         self.wires.insert(key, WireState::Consumed);
-        self.at_end.push((local, space));
+        self.at_end.push((local, AtEnd::Write(space)));
       }
       Some(_) => {
         let (reg, len) = self.read_value(port);
@@ -1536,7 +2082,9 @@ impl UnitBuilder<'_, '_> {
       Some(WireState::Discard) => {
         self.wires.insert(key, WireState::Consumed);
       }
-      Some(state) => unreachable!("{state:?}"),
+      Some(state) => {
+        unreachable!("{state:?} in {} ({:?}, step {})", self.fragment.path, self.stage, self.step)
+      }
     }
   }
 
@@ -1603,6 +2151,39 @@ impl UnitBuilder<'_, '_> {
   /// Makes a virtual space real, as it escapes the unit: its value will arrive
   /// in the continuation frame.
   fn materialize(&mut self, space: Reg) {
+    let Some(targets) = self.virtual_spaces.get(&space) else { return };
+    // A local's value is received by a hole instead, which is only read once
+    // the value is needed; it may arrive much later (e.g. when a reference to
+    // the local is released), and waiting for the continuation frame would
+    // wait for it.
+    if let Some(local) = self.local_with_regs(targets)
+      && self.locals[local] == LocalState::Valid
+    {
+      let targets = self.virtual_spaces.remove(&space).unwrap();
+      for target in &targets {
+        self.unwritten.remove(target);
+      }
+      let hole = self.alloc(1);
+      self.code.push(Instr::HoleNew { dst: hole, len: targets.len() as u32 });
+      self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
+      self.locals[local] = LocalState::Hole(hole);
+      return;
+    }
+    self.materialize_cont(space);
+  }
+
+  /// The local whose registers are exactly `regs`, if any.
+  fn local_with_regs(&self, regs: &[Reg]) -> Option<Local> {
+    let first = *regs.first()?;
+    let len = regs.len() as u32;
+    if (0..len).any(|i| regs[i as usize] != first.offset(i)) {
+      return None;
+    }
+    self.local_regs.iter().find(|&(_, &r)| r == (first, len)).map(|(&local, _)| local)
+  }
+
+  /// Makes a virtual space real, pointing into the continuation frame.
+  fn materialize_cont(&mut self, space: Reg) {
     let Some(targets) = self.virtual_spaces.remove(&space) else { return };
     if self.cont.is_none() {
       let frame = self.alloc(1);
@@ -1637,31 +2218,108 @@ impl UnitBuilder<'_, '_> {
       }
       return;
     }
-    // If the value will itself be written through a virtual space, that space
-    // simply becomes `space`.
-    if len != 0
-      && let Some(&(virtual_space, 0)) = self.unwritten.get(&src)
-      && self.virtual_spaces[&virtual_space].len() == len as usize
-      && (0..len).all(|i| self.unwritten.get(&src.offset(i)) == Some(&(virtual_space, i as usize)))
-    {
-      for i in 0..len {
-        self.unwritten.remove(&src.offset(i));
-      }
-      self.virtual_spaces.remove(&virtual_space);
-      self.code.push(Instr::Move { dst: virtual_space, src: space, len: 1 });
+    // Parts of the value which will themselves be written through virtual
+    // spaces are written directly into the corresponding parts of `space`:
+    // the virtual spaces become spaces for those parts.
+    let runs = self.runs(src, len);
+    if runs.iter().all(|run| !run.2) {
+      self.materialize_range(src, len);
+      self.require(src, len);
+      self.require(space, 1);
+      self.code.push(Instr::Write { space, src, len });
       return;
     }
-    self.materialize_range(src, len);
-    self.require(src, len);
+    for &(start, len, virtual_) in &runs {
+      if !virtual_ {
+        self.materialize_range(src.offset(start), len);
+        self.require(src.offset(start), len);
+      }
+    }
     self.require(space, 1);
-    self.code.push(Instr::Write { space, src, len });
+    let parts = if runs.len() == 1 {
+      space
+    } else {
+      let parts = self.alloc(runs.len() as u32);
+      let offsets = runs.iter().map(|run| run.0).collect();
+      let dsts = (0..runs.len() as u32).map(|i| parts.offset(i)).collect();
+      self.code.push(Instr::Split { space, offsets, dsts });
+      parts
+    };
+    for (i, (start, len, virtual_)) in runs.into_iter().enumerate() {
+      let part = parts.offset(i as u32);
+      let src = src.offset(start);
+      if virtual_ {
+        let (virtual_space, _) = self.unwritten[&src];
+        for j in 0..len {
+          self.unwritten.remove(&src.offset(j));
+        }
+        self.virtual_spaces.remove(&virtual_space);
+        self.code.push(Instr::Move { dst: virtual_space, src: part, len: 1 });
+      } else {
+        self.code.push(Instr::Write { space: part, src, len });
+      }
+    }
   }
 
-  /// Fills `len` words of another frame.
+  /// Splits registers into runs, each either written through one virtual
+  /// space, or not; returns their starts, lengths, and whether they are
+  /// virtual.
+  fn runs(&self, src: Reg, len: u32) -> Vec<(u32, u32, bool)> {
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < len {
+      if let Some(run) = self.virtual_run(src.offset(i), len - i) {
+        runs.push((i, run, true));
+        i += run;
+        continue;
+      }
+      let start = i;
+      while i < len && self.virtual_run(src.offset(i), len - i).is_none() {
+        i += 1;
+      }
+      runs.push((start, i - start, false));
+    }
+    runs
+  }
+
+  /// Fills `len` words of another frame. Words which will be written through
+  /// a virtual space are written into the frame directly: the virtual space
+  /// becomes a space pointing into it.
   fn emit_fill(&mut self, frame: Reg, offset: u32, src: Reg, len: u32) {
-    self.materialize_range(src, len);
-    self.require(src, len);
-    self.code.push(Instr::Fill { frame, offset, src, len });
+    for (start, len, virtual_) in self.runs(src, len) {
+      let (src, offset) = (src.offset(start), offset + start);
+      if virtual_ {
+        let (space, _) = self.unwritten[&src];
+        for j in 0..len {
+          self.unwritten.remove(&src.offset(j));
+        }
+        self.virtual_spaces.remove(&space);
+        self.code.push(Instr::Space { dst: space, frame, offset });
+      } else {
+        self.materialize_range(src, len);
+        self.require(src, len);
+        self.code.push(Instr::Fill { frame, offset, src, len });
+      }
+    }
+  }
+
+  /// If `reg` is the first of the registers written through a virtual space,
+  /// all within the next `max` registers, returns their number.
+  fn virtual_run(&self, reg: Reg, max: u32) -> Option<u32> {
+    let &(space, 0) = self.unwritten.get(&reg)? else { return None };
+    let targets = &self.virtual_spaces[&space];
+    let len = targets.len() as u32;
+    (len <= max && (0..len).all(|i| targets[i as usize] == reg.offset(i))).then_some(len)
+  }
+
+  /// Like `require`, but allows registers to be written through virtual
+  /// spaces, if they are filled into a frame with `emit_fill`.
+  fn require_filled(&mut self, reg: Reg, len: u32) {
+    for (start, len, virtual_) in self.runs(reg, len) {
+      if !virtual_ {
+        self.require(reg.offset(start), len);
+      }
+    }
   }
 
   /// Moves `len` words; pending words are moved by changing which register
@@ -1709,11 +2367,12 @@ impl UnitBuilder<'_, '_> {
     live.extend(self.temps.iter().copied());
     live.extend(self.live_wires());
     live.extend(self.ret_space.map(|r| (r, 1)));
-    live.extend(self.at_end.iter().map(|&(_, space)| (space, 1)));
+    live.extend(self.at_end.iter().map(|&(_, action)| (action.reg(), 1)));
     let valid = self.locals.iter().filter(|(_, s)| **s == LocalState::Valid).map(|(l, _)| l);
     for local in valid.collect::<Vec<_>>() {
       live.push(self.local_regs(local));
     }
+    live.extend(self.hole_locals());
     for (reg, len) in live {
       for i in 0..len {
         let r = reg.offset(i);
@@ -1734,6 +2393,15 @@ impl UnitBuilder<'_, '_> {
     let entry = self.label();
     self.e.program.blocks[cont.block] = Block { unit: self.unit, entry, frame: cont.map };
     self.pending.clear();
+  }
+
+  /// The registers of the holes of locals in the `Hole` state.
+  fn hole_locals(&self) -> Vec<(Reg, u32)> {
+    let holes = self.locals.iter().filter_map(|(_, state)| match *state {
+      LocalState::Hole(hole) => Some((hole, 1)),
+      _ => None,
+    });
+    holes.collect()
   }
 
   /// The registers of the current stage's wires whose values have been
@@ -1765,6 +2433,59 @@ impl UnitBuilder<'_, '_> {
   }
 }
 
+/// What happens with a local's final value when the current scope ends.
+#[derive(Debug, Clone, Copy)]
+enum AtEnd {
+  /// It is written into this space.
+  Write(Reg),
+  /// It is a space, which this hole's value (of the given size) is forwarded
+  /// into.
+  Forward(Reg, u32),
+}
+
+impl AtEnd {
+  fn reg(self) -> Reg {
+    match self {
+      AtEnd::Write(reg) | AtEnd::Forward(reg, _) => reg,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EnvWords {
+  Value(u32),
+  Space,
+}
+
+impl EnvWords {
+  fn len(self) -> u32 {
+    match self {
+      EnvWords::Value(len) => len,
+      EnvWords::Space => 1,
+    }
+  }
+}
+
+/// Whether a step only moves data; such steps are emitted once their inputs
+/// are available.
+fn moves_data(step: &Step) -> bool {
+  matches!(
+    step,
+    Step::Composite(..)
+      | Step::Ref(..)
+      | Step::Rewrap(..)
+      | Step::Link(..)
+      | Step::Union(..)
+      | Step::Enum(..)
+  )
+}
+
+/// Whether a transfer into an interface creates a value (a closure), rather
+/// than transferring control.
+fn creates_value(kind: &InterfaceKind) -> bool {
+  matches!(kind, InterfaceKind::Closure { .. } | InterfaceKind::Inspect(_))
+}
+
 enum ListPart {
   Value((Reg, u32)),
   Char(char),
@@ -1774,7 +2495,7 @@ enum ListPart {
 
 enum CallTarget {
   Rel(FnRelId),
-  Const(SpecId),
+  Spec(SpecId, StageId),
 }
 
 enum CallArg {
