@@ -310,13 +310,34 @@ pub mod N32 {
     safe $ivy { ${a} = vi:ext#2[vi:n32:mul_high](${b} ^) }
   }
 
+  /// Count leading zero bits in at most five binary-search steps.
+  /// Zero has 32 leading zeros.
   pub fn .leading_zeros(n: N32) -> N32 {
-    let zeros = 32;
-    while n != 0 {
-      zeros -= 1;
-      n >>= 1;
+    if n == 0 {
+      return 32;
     }
-    zeros
+    let zeros = 0;
+    if n < 0x10000 {
+      n <<= 16;
+      zeros += 16;
+    }
+    if n < 0x1000000 {
+      n <<= 8;
+      zeros += 8;
+    }
+    if n < 0x10000000 {
+      n <<= 4;
+      zeros += 4;
+    }
+    if n < 0x40000000 {
+      n <<= 2;
+      zeros += 2;
+    }
+    if n < 0x80000000 {
+      zeros + 1
+    } else {
+      zeros
+    }
   }
 
   pub fn .trailing_zeros(n: N32) -> N32 {
