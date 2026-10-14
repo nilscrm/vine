@@ -1,0 +1,12 @@
+
+use #root::data::Lookup;
+fn table() -> Lookup::Size32768[N32] {
+  Lookup((0..20000).map(fn* (x: N32) { x * 3 }).collect[List]())
+}
+pub fn main(&io: &IO) {
+  assert table.lookup(0) == 0 else { debug::error("check failed") }
+  assert table.lookup(8191) == 24573 else { debug::error("check failed") }
+  assert table.lookup(16384) == 49152 else { debug::error("check failed") }
+  assert table.lookup(19999) == 59997 else { debug::error("check failed") }
+  io.println("passed");
+}

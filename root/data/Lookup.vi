@@ -3,17 +3,17 @@
 /// ```vi
 /// use #root::data::Lookup;
 ///
-/// fn primes(_: Lookup::Size8) -> List[N32] {
-///   [2, 3, 5, 7, 11, 13]
+/// fn primes() -> Lookup::Size8[N32] {
+///   Lookup([2, 3, 5, 7, 11, 13])
 /// }
 ///
 /// primes.lookup(2) // 5
 /// ```
 ///
-/// Functions of the form `fn (Lookup::SizeN) -> List[T]` implement the
+/// Functions of the form `fn () -> Lookup::SizeN[T]` implement the
 /// `Lookup` trait, allowing `O(log(n))` lookup via the `lookup` method.
 ///
-/// The `Lookup::SizeN` parameter provides a power-of-two upper bound on the
+/// The `Lookup::SizeN` return type provides a power-of-two upper bound on the
 /// length of the list; it is an error if the list exceeds this length.
 mod;
 
@@ -31,6 +31,7 @@ pub fn .lookup[L?, N, T; Lookup[L, N, T], Size[N], Drop[T]](_: L, index: N32) ->
   assert Lookup::table[L].len() <= Size::max_size[N] else {
     debug::error("lookup table size exceeds given upper bound")
   }
+  assert index < Lookup::table[L].len() else { debug::error("lookup index out of bounds") }
   Size::select[N; _, table[L]](index)
 }
 
@@ -93,6 +94,9 @@ type _512 = S[_256];
 type _1024 = S[_512];
 type _2048 = S[_1024];
 type _4096 = S[_2048];
+type _8192 = S[_4096];
+type _16384 = S[_8192];
+type _32768 = S[_16384];
 
 pub type Size1[T] = Lookup[_1, T];
 pub type Size2[T] = Lookup[_2, T];
@@ -107,6 +111,9 @@ pub type Size512[T] = Lookup[_512, T];
 pub type Size1024[T] = Lookup[_1024, T];
 pub type Size2048[T] = Lookup[_2048, T];
 pub type Size4096[T] = Lookup[_4096, T];
+pub type Size8192[T] = Lookup[_8192, T];
+pub type Size16384[T] = Lookup[_16384, T];
+pub type Size32768[T] = Lookup[_32768, T];
 
 trait[] Const[T] {
   const value: T;

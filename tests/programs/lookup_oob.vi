@@ -1,0 +1,9 @@
+
+// @fail
+use #root::data::Lookup;
+fn table() -> Lookup::Size8[N32] {
+  Lookup([10, 20, 30])
+}
+pub fn main(&io: &IO) {
+  io.println("{table.lookup(black_box(8))}");
+}
