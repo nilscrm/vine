@@ -126,6 +126,18 @@ impl<'a> FramesEmitter<'a> {
     while let Some(spec_id) = self.queue.pop() {
       self.emit_spec(spec_id);
     }
+    let mut missing = self
+      .entries
+      .iter()
+      .filter(|&(_, &block)| self.program.blocks[block].unit == UnitId(usize::MAX));
+    if let Some((&(spec_id, stage), _)) = missing.next() {
+      let name = match self.specs.spec(spec_id).kind {
+        SpecKind::Fragment(fragment) => self.fragments[fragment].path.clone(),
+        ref kind => format!("{kind:?}"),
+      };
+      let what = format!("an entry point at {stage:?} of {name}");
+      self.error(Diag::FramesUnsupported { span: Span::NONE, what });
+    }
 
     self.layouter.diags.bail()?;
     Ok(self.program)
@@ -147,9 +159,13 @@ impl<'a> FramesEmitter<'a> {
     match &spec.kind {
       SpecKind::Fragment(fragment_id) => {
         let (unit_id, entries) = unit::emit_unit(self, spec_id, *fragment_id);
+        // Blocks for all entry points are created, as some may only be
+        // requested later.
         for (stage, entry, frame) in entries {
-          if let Some(&block) = self.entries.get(&(spec_id, stage)) {
-            self.program.blocks[block] = Block { unit: unit_id, entry, frame };
+          let block = Block { unit: unit_id, entry, frame };
+          match self.entries.get(&(spec_id, stage)) {
+            Some(&id) => self.program.blocks[id] = block,
+            None => _ = self.entries.insert((spec_id, stage), self.program.blocks.push(block)),
           }
         }
       }
