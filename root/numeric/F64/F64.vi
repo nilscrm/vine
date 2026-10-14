@@ -9,6 +9,10 @@ mod common;
 pub mod F64 {
   pub mod exp;
   pub mod ln;
+  pub mod sin_bounded;
+
+  /// Nearest binary64 value to pi.
+  pub const pi: F64 = 3.141592653589793[F64];
 
   pub const nan: F64 = F32::nan as F64;
   pub const inf: F64 = F32::inf as F64;

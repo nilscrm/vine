@@ -1,0 +1,77 @@
+
+// Bounded sine implemented entirely with visible Vine arithmetic.
+// Range reduction uses three nonoverlapping parts of pi/2; kernels use
+// degree17 sine and degree18 cosine Taylor polynomials on [-pi/4,pi/4].
+// Domain: finite |x|<=128 radians. This is NOT a general F64 sine API.
+// Empirically <=1 ULP on2420 independent high-precision vectors; not a
+// proof of correct rounding. Tests enforce a4-ULP regression envelope.
+// Horner was selected over balanced evaluation by matched depth measurements.
+
+/// Bounded software sine: finite |x|<=128; NaN/infinity ->NaN; signed zero preserved.
+/// No promise of correct rounding. Out-of-domain finite inputs fail explicitly.
+pub fn .sin_bounded(x: F64) -> F64 {
+  if x != x {
+    return x;
+  }
+  let neg = x < 0.0[F64];
+  let a = if neg { -x } else { x };
+  if a == F64::inf {
+    return F64::nan;
+  }
+  assert a <= 128.0[F64] else { debug::error("sin_bounded requires |x| <= 128") }
+  if a < 7.450580596923828125e-9[F64] {
+    return x;
+  }
+  let n = (a * 0.63661977236758134308[F64] + 0.5[F64]) as N32;
+  let nf = n as F64;
+  let r = a - nf * 1.57079632673412561417[F64];
+  let t = nf * 6.07710050630396597660e-11[F64];
+  let y = r - t;
+  let tail = ((r - y) - t) - nf * 2.02226624879595063154e-21[F64];
+  let z = y * y;
+  let sp = (-1.66666666666666657e-01[F64]
+    + z
+      * (8.33333333333333322e-03[F64]
+        + z
+          * (-1.98412698412698413e-04[F64]
+            + z
+              * (2.75573192239858925e-06[F64]
+                + z
+                  * (-2.50521083854417202e-08[F64]
+                    + z
+                      * (1.60590438368216133e-10[F64]
+                        + z * (-7.64716373181981641e-13[F64] + z * 2.81145725434552060e-15[F64])
+                      )
+                  )
+              )
+          )
+      )
+  );
+  let cp = (4.16666666666666644e-02[F64]
+    + z
+      * (-1.38888888888888894e-03[F64]
+        + z
+          * (2.48015873015873016e-05[F64]
+            + z
+              * (-2.75573192239858883e-07[F64]
+                + z
+                  * (2.08767569878681002e-09[F64]
+                    + z
+                      * (-1.14707455977297245e-11[F64]
+                        + z * (4.77947733238738525e-14[F64] + z * -1.56192069685862253e-16[F64])
+                      )
+                  )
+              )
+          )
+      )
+  );
+  let s = y + (y * z) * sp;
+  let c = (1.0[F64] - 0.5[F64] * z) + (z * z) * cp;
+  let v = if (n & 1) == 0 { s + tail * c } else { c - tail * s };
+  let v = if (n & 2) == 0 { v } else { -v };
+  if neg {
+    -v
+  } else {
+    v
+  }
+}
