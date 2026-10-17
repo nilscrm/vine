@@ -222,6 +222,8 @@ pub(super) fn emit_unit(
     held: HashMap::new(),
     holes: HashMap::new(),
     lazy_returns: HashMap::new(),
+    lazy_inputs: HashMap::new(),
+    lazy_locals: Vec::new(),
     temps: Vec::new(),
     tasks: Vec::new(),
     extra_wires: usize::MAX,
@@ -286,6 +288,11 @@ struct UnitBuilder<'e, 'a> {
   /// only passed on there, and the registers of the holes returning them; the
   /// code after the return point is shared by every path returning to it.
   lazy_returns: HashMap<ReturnPoint, Vec<(Local, Reg)>>,
+  /// For each interface, the locals passed to it in holes, and the registers
+  /// of the holes; all transfers into an interface agree on these.
+  lazy_inputs: HashMap<InterfaceId, Vec<(Local, Reg)>>,
+  /// The locals which were passed to the current stage in holes.
+  lazy_locals: Vec<Local>,
   /// Registers read by the current step, which must be preserved if it
   /// suspends.
   temps: Vec<(Reg, u32)>,
@@ -403,10 +410,17 @@ impl UnitBuilder<'_, '_> {
     self.unwritten.clear();
     self.held.clear();
     self.holes.clear();
+    self.temps.clear();
 
     let interface = &self.vir.interfaces[stage.interface];
     for (&local, &(input, _, _)) in &interface.wires {
       self.locals[local] = if input { LocalState::Valid } else { LocalState::Empty };
+    }
+    self.lazy_locals.clear();
+    for (local, hole) in self.lazy_inputs.get(&stage.interface).cloned().unwrap_or_default() {
+      let (reg, len) = self.local_regs(local);
+      self.hold_regs(hole, (0..len).map(|i| reg.offset(i)).collect());
+      self.lazy_locals.push(local);
     }
 
     self.emit_header(stage_id);
@@ -578,11 +592,11 @@ impl UnitBuilder<'_, '_> {
         for local in self.locals.keys().collect::<Vec<_>>() {
           let returned = match interface.wires.get(&local) {
             Some(&(_, _, true)) => true,
-            Some(_) => {
+            Some(_) if !self.preserved.contains(&local) => {
               self.drop_local(local);
               false
             }
-            None => self.preserved.contains(&local),
+            _ => self.preserved.contains(&local),
           };
           if !returned || self.locals[local] == LocalState::Empty {
             continue;
@@ -972,6 +986,11 @@ impl UnitBuilder<'_, '_> {
       Some(WireState::Value(reg, len)) => {
         let regs = self.local_regs(local);
         self.move_regs(regs.0, reg, len);
+        // The local may be larger, e.g. if its type is an `if const`, whose
+        // layout fits either branch.
+        for i in len..regs.1 {
+          self.code.push(Instr::Const { dst: regs.0.offset(i), value: 0 });
+        }
         self.wires.insert(key, WireState::Consumed);
         self.locals[local] = LocalState::Valid;
       }
@@ -1068,7 +1087,8 @@ impl UnitBuilder<'_, '_> {
       }
     }
     // Its final value is read.
-    if self.at_end.iter().any(|&(l, _)| l == local)
+    if self.preserved.contains(&local)
+      || self.at_end.iter().any(|&(l, _)| l == local)
       || self.wires.iter().any(|(key, state)| {
         key.0 == self.stage && matches!(state, WireState::LocalAtEnd(l) if *l == local)
       })
@@ -1093,39 +1113,6 @@ impl UnitBuilder<'_, '_> {
 
     let data = transfer.data.as_ref().map(|data| self.read_value(data));
 
-    // Pass the locals the target needs; they are kept in their registers.
-    for (&local, &(input, _, _)) in &interface.wires {
-      if input && self.locals[local] != LocalState::Empty {
-        let (reg, len) = self.local_value(local);
-        self.resolve(reg, len);
-      }
-    }
-    let mut preserved = Vec::new();
-    if !child {
-      // The stage ends here. Locals the target takes are passed on; outputs
-      // of this stage's interface are preserved, until control returns. The
-      // scopes of other locals end.
-      let own = &self.vir.interfaces[stage.interface];
-      preserved = self.preserved.clone();
-      for (&local, &(_, _, output)) in &own.wires {
-        if output && !matches!(interface.wires.get(&local), Some(&(true, _, _))) {
-          preserved.push(local);
-        }
-      }
-      let keep = |local: Local| {
-        matches!(interface.wires.get(&local), Some(&(true, _, _))) || preserved.contains(&local)
-      };
-      self.emit_at_end_except(|_, local| keep(local));
-      for local in self.locals.keys().collect::<Vec<_>>() {
-        if !keep(local) {
-          self.drop_local(local);
-        } else if self.locals[local] != LocalState::Empty {
-          // Holds do not carry over to other stages.
-          let (reg, len) = self.local_value(local);
-          self.resolve(reg, len);
-        }
-      }
-    }
     // Locals the target only reads, which this stage keeps: the target gets a
     // copy.
     let mut kept = Vec::new();
@@ -1143,7 +1130,96 @@ impl UnitBuilder<'_, '_> {
         }
       }
     }
+
+    // Locals whose values are produced by code after this transfer (e.g. a
+    // local whose final value is read before it is written, or which is
+    // borrowed by a reference the target takes), or which were passed to this
+    // stage in holes, are passed in holes, so that only the code which reads
+    // them waits for them. Other locals are waited for here.
+    let lazy = match self.lazy_inputs.get(&transfer.interface) {
+      Some(lazy) => lazy.clone(),
+      None => {
+        let mut lazy = Vec::new();
+        for (&local, &(input, _, _)) in &interface.wires {
+          let (reg, len) = self.local_regs(local);
+          let waits = self.locals[local] == LocalState::Empty
+            || (0..len).any(|i| self.unwritten.contains_key(&reg.offset(i)))
+            || (self.lazy_locals.contains(&local) && self.local_waits(local));
+          if input && len != 0 && waits {
+            lazy.push((local, self.alloc(1)));
+          }
+        }
+        self.lazy_inputs.insert(transfer.interface, lazy.clone());
+        lazy
+      }
+    };
+    for &(local, canonical) in &lazy {
+      let hole = if self.locals[local] == LocalState::Empty {
+        // Its value once the current scope ends.
+        let (_, len) = self.local_regs(local);
+        let hole = self.alloc(1);
+        self.code.push(Instr::HoleNew { dst: hole, len });
+        let space = self.alloc(1);
+        self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
+        self.at_end.push((local, AtEnd::Write(space)));
+        hole
+      } else {
+        let (reg, len) = self.local_value(local);
+        self.locals[local] = LocalState::Empty;
+        self.hole_holding(reg, len)
+      };
+      self.code.push(Instr::Move { dst: canonical, src: hole, len: 1 });
+      self.temps.push((canonical, 1));
+    }
+
+    // Pass the locals the target needs; they are kept in their registers.
+    // Virtual spaces only exist while the current stage is emitted, so they
+    // are made real.
+    for (&local, &(input, _, _)) in &interface.wires {
+      if input && self.locals[local] != LocalState::Empty {
+        let (reg, len) = self.local_value(local);
+        self.materialize_range(reg, len);
+        self.resolve(reg, len);
+      }
+    }
+    let mut preserved = Vec::new();
+    if !child {
+      // The stage ends here. Locals the target takes are passed on; outputs
+      // of this stage's interface are preserved, until control returns; as
+      // are those which the target only reads. The scopes of other locals end.
+      let own = &self.vir.interfaces[stage.interface];
+      preserved = self.preserved.clone();
+      for (&local, &(_, _, output)) in &own.wires {
+        let taken = match interface.wires.get(&local) {
+          Some(&(true, barrier, output)) => barrier || output,
+          _ => false,
+        };
+        if output && !taken && !preserved.contains(&local) {
+          preserved.push(local);
+        }
+      }
+      let keep = |local: Local| {
+        matches!(interface.wires.get(&local), Some(&(true, _, _))) || preserved.contains(&local)
+      };
+      self.emit_at_end_except(|_, local| keep(local));
+      for &(_, action) in &self.at_end.clone() {
+        self.materialize(action.reg());
+      }
+      for local in self.locals.keys().collect::<Vec<_>>() {
+        if !keep(local) {
+          self.drop_local(local);
+        } else if self.locals[local] != LocalState::Empty {
+          // Holds and virtual spaces do not carry over to other stages.
+          let (reg, len) = self.local_value(local);
+          self.materialize_range(reg, len);
+          self.resolve(reg, len);
+        }
+      }
+    }
+    // The copies are preserved if this waits.
+    self.temps.extend(kept.iter().map(|&(_, copy, len)| (copy, len)));
     if let Some((reg, len)) = data {
+      self.materialize_range(reg, len);
       self.require(reg, len);
     }
     self.suspend();
@@ -2004,6 +2080,11 @@ impl UnitBuilder<'_, '_> {
           self.move_regs(reg.offset(offset), src, len);
           offset += size;
         }
+      }
+      // E.g. the space of a reference to an empty value, which is never
+      // written through.
+      for i in offset..info.layout.size {
+        self.code.push(Instr::Const { dst: reg.offset(i), value: 0 });
       }
       self.write_value(port, reg, info.layout.size);
     } else {
