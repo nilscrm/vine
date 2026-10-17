@@ -2016,7 +2016,7 @@ impl UnitBuilder<'_, '_> {
       match *part {
         ListPart::Value((reg, len)) => self.require(reg, len),
         ListPart::List(reg) => self.require(reg, 3),
-        ListPart::Char(_) => {}
+        ListPart::Char(_) | ListPart::Word(_) => {}
       }
     }
     let node_size = element_size + 1;
@@ -2028,11 +2028,12 @@ impl UnitBuilder<'_, '_> {
     self.code.push(Instr::Space { dst: tail, frame: list.offset(1), offset: 1 });
     for part in parts {
       match part {
-        ListPart::Value(_) | ListPart::Char(_) => {
+        ListPart::Value(_) | ListPart::Char(_) | ListPart::Word(_) => {
           let node = self.alloc(node_size);
           match part {
             ListPart::Value((reg, len)) => self.move_regs(node, reg, len),
             ListPart::Char(c) => self.code.push(Instr::Const { dst: node, value: c as u64 }),
+            ListPart::Word(w) => self.code.push(Instr::Const { dst: node, value: w as u64 }),
             ListPart::List(_) => unreachable!(),
           }
           self.code.push(Instr::HoleNew { dst: node.offset(element_size), len: node_size });
@@ -2364,17 +2365,19 @@ impl UnitBuilder<'_, '_> {
     let info = self.port_info(port);
     let size = info.layout.size;
     let Some(key) = info.key else {
+      if let PortKind::Nat(nat) = &port.kind {
+        // A `Nat` is a list of its 32-bit digits, least significant first.
+        let list = self.build_list(1, nat.0.iter().map(|&digit| ListPart::Word(digit)).collect());
+        self.temps.push((list, 3));
+        return (list, 3);
+      }
       let words: Vec<u64> = match &port.kind {
         PortKind::Nil | PortKind::Error(_) => vec![0; size as usize],
         PortKind::Bool(b) => vec![*b as u64],
         PortKind::N32(n) => vec![*n as u64],
         PortKind::F32(f) => vec![f.to_bits() as u64],
         PortKind::F64(f) => vec![f.to_bits()],
-        PortKind::Nat(_) => {
-          self.unsupported("`Nat` literals".into());
-          vec![0; size as usize]
-        }
-        PortKind::Wire(..) => unreachable!(),
+        PortKind::Nat(_) | PortKind::Wire(..) => unreachable!(),
       };
       let reg = self.alloc(words.len() as u32);
       for (i, word) in words.into_iter().enumerate() {
@@ -3461,6 +3464,7 @@ fn creates_value(kind: &InterfaceKind) -> bool {
 enum ListPart {
   Value((Reg, u32)),
   Char(char),
+  Word(u32),
   /// The registers of another list.
   List(Reg),
 }
