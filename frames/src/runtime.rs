@@ -357,7 +357,10 @@ impl<'p, 'h> Runtime<'p, 'h> {
   fn check_hole(&self, hole: Addr, len: u32, unit: &Unit, pc: usize) {
     if self.trace && self.hole_sizes.get(&hole).map(|x| x.0) != Some(len) {
       let size = self.hole_sizes.get(&hole);
-      eprintln!("trace: hole {} of size {size:?} used with size {len} in {} at {pc}", hole.0, unit.name);
+      eprintln!(
+        "trace: hole {} of size {size:?} used with size {len} in {} at {pc}",
+        hole.0, unit.name
+      );
     }
   }
 

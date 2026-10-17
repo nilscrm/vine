@@ -8,21 +8,27 @@
 //! connection. A writer either produces the value in registers, or, if it can
 //! only deliver the value later (e.g. a call's result), it asks for a *space*
 //! to write it into: if the reader forwards the value into a space itself, the
-//! writer gets that space; otherwise, the value will arrive in a slot of the
-//! current *continuation frame*.
+//! writer gets that space; otherwise, the value is *held* by a hole.
 //!
 //! # Waiting
 //!
-//! Registers whose values will arrive in the continuation frame are *pending*.
-//! Moving a pending value only changes which register the slot is loaded into;
-//! only code which reads the value waits, by *suspending*: the live registers
-//! are saved into the continuation frame, the block ends, and execution resumes
-//! at a new entry point once the frame is ready.
+//! Code is emitted in program order, but only waits where the data requires
+//! it. A value which is not available yet is held by a hole: writing it into a
+//! space forwards the hole, and moving it only changes which registers it
+//! belongs in. A step which reads such values (e.g. an operation, or building a
+//! string) is emitted into a *task* of its own: a frame of this unit which
+//! receives the values the step reads, and spaces for the values it writes, and
+//! runs the step once they have all arrived (see `emit_detached`). The code
+//! emitting it goes on without waiting, so the step waits only for its own
+//! inputs, as in a dataflow graph.
 //!
-//! Suspending waits for all pending values, so a value which may arrive much
-//! later, and is only passed on rather than used (e.g. a call's result which is
-//! returned), is instead *held* by a hole: writing it into a space forwards the
-//! hole, and only code which reads it waits for it.
+//! Only control flow waits: a branch or match on a value which is not available
+//! yet, and locals passed to another stage, *suspend*. The values waited for
+//! arrive in a *continuation frame*, along with the live registers; the block
+//! ends, and execution resumes at a new entry point once the frame is ready.
+//! Locals whose values are produced by code after the transfer (e.g. which are
+//! borrowed by a reference the target takes, or whose final value is read) are
+//! passed in holes instead (`lazy_inputs`).
 //!
 //! # Control flow
 //!
@@ -35,7 +41,7 @@
 use std::{
   collections::{BTreeMap, HashMap},
   env,
-  mem::take,
+  mem::{swap, take},
 };
 
 use frames::program::{Block, BlockId, Instr, IoOp, Label, Reg, Unit, UnitId};
@@ -1149,7 +1155,7 @@ impl UnitBuilder<'_, '_> {
         let mut lazy = Vec::new();
         for local in self.locals.keys().collect::<Vec<_>>() {
           let input = matches!(interface.wires.get(&local), Some(&(true, _, _)));
-          if !input && !(!child && owed.contains(&local)) {
+          if !input && (child || !owed.contains(&local)) {
             continue;
           }
           let (reg, len) = self.local_regs(local);
@@ -2904,15 +2910,15 @@ impl UnitBuilder<'_, '_> {
   }
 
   fn swap_flow(&mut self, flow: &mut Flow) {
-    std::mem::swap(&mut self.code, &mut flow.code);
-    std::mem::swap(&mut self.wires, &mut flow.wires);
-    std::mem::swap(&mut self.pending, &mut flow.pending);
-    std::mem::swap(&mut self.cont, &mut flow.cont);
-    std::mem::swap(&mut self.virtual_spaces, &mut flow.virtual_spaces);
-    std::mem::swap(&mut self.unwritten, &mut flow.unwritten);
-    std::mem::swap(&mut self.held, &mut flow.held);
-    std::mem::swap(&mut self.holes, &mut flow.holes);
-    std::mem::swap(&mut self.temps, &mut flow.temps);
+    swap(&mut self.code, &mut flow.code);
+    swap(&mut self.wires, &mut flow.wires);
+    swap(&mut self.pending, &mut flow.pending);
+    swap(&mut self.cont, &mut flow.cont);
+    swap(&mut self.virtual_spaces, &mut flow.virtual_spaces);
+    swap(&mut self.unwritten, &mut flow.unwritten);
+    swap(&mut self.held, &mut flow.held);
+    swap(&mut self.holes, &mut flow.holes);
+    swap(&mut self.temps, &mut flow.temps);
   }
 
   /// Whether the value a local has after the step at `index` is only passed

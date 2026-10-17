@@ -145,9 +145,10 @@ impl Charter<'_> {
       "Opaque" => set(&mut b.opaque, trait_id),
       "Default" => set(&mut b.default, trait_id),
       "debug_state" => set(&mut b.debug_state, fn_id),
-      "debug_enabled" => {
-        set(&mut b.debug_enabled, if let ChartedItem::Const(def, _) = item { Some(def) } else { None })
-      }
+      "debug_enabled" => set(
+        &mut b.debug_enabled,
+        if let ChartedItem::Const(def, _) = item { Some(def) } else { None },
+      ),
       "Show" => set(&mut b.show, trait_id),
       "repl_show" => set(&mut b.repl_show, fn_id),
       "add" => binary_op(b, BinaryOp::Add, fn_id),
