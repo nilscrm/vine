@@ -105,10 +105,10 @@ struct Context {
   ret_space: Option<Reg>,
   /// The entry point's result.
   result: Option<(WireKey, Port)>,
-  /// Locals which are not part of the stage's interface, but are outputs of
-  /// an earlier stage which transferred to it, and must be preserved until
-  /// control returns.
-  preserved: Vec<Local>,
+  /// The locals the current chain of stages returns, once control returns to
+  /// the step after the transfer which started it: the outputs of that
+  /// transfer's interface.
+  owed: Vec<Local>,
 }
 
 impl Context {
@@ -119,7 +119,7 @@ impl Context {
       at_end: Vec::new(),
       ret_space: None,
       result: None,
-      preserved: Vec::new(),
+      owed: Vec::new(),
     }
   }
 }
@@ -229,7 +229,7 @@ pub(super) fn emit_unit(
     extra_wires: usize::MAX,
     ret_space: None,
     result: None,
-    preserved: Vec::new(),
+    owed: Vec::new(),
     at_end: Vec::new(),
     stage_labels: HashMap::new(),
     fixups: Vec::new(),
@@ -304,7 +304,7 @@ struct UnitBuilder<'e, 'a> {
   ret_space: Option<Reg>,
   /// The header's result, written when the fragment returns.
   result: Option<(WireKey, Port)>,
-  preserved: Vec<Local>,
+  owed: Vec<Local>,
   /// Spaces to write locals' final values into when the current scope ends.
   at_end: Vec<(Local, AtEnd)>,
 
@@ -404,7 +404,7 @@ impl UnitBuilder<'_, '_> {
     self.at_end = context.at_end.clone();
     self.ret_space = context.ret_space;
     self.result = context.result.clone();
-    self.preserved = context.preserved.clone();
+    self.owed = context.owed.clone();
     debug_assert!(self.cont.is_none() && self.pending.is_empty());
     self.virtual_spaces.clear();
     self.unwritten.clear();
@@ -559,7 +559,6 @@ impl UnitBuilder<'_, '_> {
   }
 
   fn end_stage(&mut self) {
-    let stage = &self.vir.stages[self.stage];
     match self.returns[&self.stage] {
       ReturnPoint::Fragment => {
         if let Some((key, _)) = self.result.clone()
@@ -587,19 +586,14 @@ impl UnitBuilder<'_, '_> {
       }
       point @ ReturnPoint::After(..) => {
         self.emit_at_end();
-        let interface = &self.vir.interfaces[stage.interface];
         let lazy = self.lazy_returns.get(&point).cloned().unwrap_or_default();
         let mut moves = Vec::new();
         for local in self.locals.keys().collect::<Vec<_>>() {
-          let returned = match interface.wires.get(&local) {
-            Some(&(_, _, true)) => true,
-            Some(_) if !self.preserved.contains(&local) => {
-              self.drop_local(local);
-              false
-            }
-            _ => self.preserved.contains(&local),
-          };
-          if !returned || self.locals[local] == LocalState::Empty {
+          if !self.owed.contains(&local) {
+            self.drop_local(local);
+            continue;
+          }
+          if self.locals[local] == LocalState::Empty {
             continue;
           }
           let (reg, len) = self.local_value(local);
@@ -1088,7 +1082,7 @@ impl UnitBuilder<'_, '_> {
       }
     }
     // Its final value is read.
-    if self.preserved.contains(&local)
+    if self.owed.contains(&local)
       || self.at_end.iter().any(|&(l, _)| l == local)
       || self.wires.iter().any(|(key, state)| {
         key.0 == self.stage && matches!(state, WireState::LocalAtEnd(l) if *l == local)
@@ -1132,25 +1126,14 @@ impl UnitBuilder<'_, '_> {
       }
     }
 
-    let mut preserved = Vec::new();
+    // If the stage ends here, the locals the target takes are passed on, and
+    // those the chain of stages returns are kept, until control returns. The
+    // scopes of other locals end.
+    let owed = self.owed.clone();
+    let keep = |local: Local| {
+      matches!(interface.wires.get(&local), Some(&(true, _, _))) || owed.contains(&local)
+    };
     if !child {
-      // The stage ends here. Locals the target takes are passed on; outputs
-      // of this stage's interface are preserved, until control returns; as
-      // are those which the target only reads. The scopes of other locals end.
-      let own = &self.vir.interfaces[stage.interface];
-      preserved = self.preserved.clone();
-      for (&local, &(_, _, output)) in &own.wires {
-        let taken = match interface.wires.get(&local) {
-          Some(&(true, barrier, output)) => barrier || output,
-          _ => false,
-        };
-        if output && !taken && !preserved.contains(&local) {
-          preserved.push(local);
-        }
-      }
-      let keep = |local: Local| {
-        matches!(interface.wires.get(&local), Some(&(true, _, _))) || preserved.contains(&local)
-      };
       self.emit_at_end_except(|_, local| keep(local));
     }
 
@@ -1166,7 +1149,7 @@ impl UnitBuilder<'_, '_> {
         let mut lazy = Vec::new();
         for local in self.locals.keys().collect::<Vec<_>>() {
           let input = matches!(interface.wires.get(&local), Some(&(true, _, _)));
-          if !input && !(!child && preserved.contains(&local)) {
+          if !input && !(!child && owed.contains(&local)) {
             continue;
           }
           let (reg, len) = self.local_regs(local);
@@ -1218,9 +1201,6 @@ impl UnitBuilder<'_, '_> {
       }
     }
     if !child {
-      let keep = |local: Local| {
-        matches!(interface.wires.get(&local), Some(&(true, _, _))) || preserved.contains(&local)
-      };
       for local in self.locals.keys().collect::<Vec<_>>() {
         if !keep(local) {
           self.drop_local(local);
@@ -1262,7 +1242,7 @@ impl UnitBuilder<'_, '_> {
         at_end: Vec::new(),
         ret_space: self.ret_space,
         result: self.result.clone(),
-        preserved: Vec::new(),
+        owed: interface.wires.iter().filter(|(_, w)| w.2).map(|(&local, _)| local).collect(),
       }
     } else {
       Context {
@@ -1271,7 +1251,7 @@ impl UnitBuilder<'_, '_> {
         at_end: self.at_end.clone(),
         ret_space: self.ret_space,
         result: self.result.clone(),
-        preserved,
+        owed,
       }
     };
     // A branch on a constant only emits the stage taken; the other may not be
