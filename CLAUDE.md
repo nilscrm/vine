@@ -9,8 +9,8 @@ the current status, and how to debug.
 - Don't keep compatibility with IVM; make the best choice for frames. The
   standard library (`root/`) may be rewritten freely.
 - Don't revisit the decisions in `docs/frames.md` without asking Nils. In
-  particular, the laziness question (detaching strict steps vs. a stricter
-  evaluation order) is open: ask before implementing either.
+  particular, waiting is dataflow: a step waits only for its own inputs, and
+  only control flow suspends.
 - Keep `docs/frames.md` up to date: update its status section (from
   `tests/frames.sh`) and any affected design notes in the same commit as the
   change.

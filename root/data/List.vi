@@ -420,8 +420,8 @@ pub mod List {
     pub impl [T]: Iterator[IterRef[T], &T] {
       fn advance(IterRef[T](len, cursor)) -> Option[(&T, IterRef[T])] {
         if len != 0 {
-          let head = safe Stream::head(&cursor.*);
-          Some(head, IterRef(len - 1, safe Stream::tail(&cursor.*)))
+          let (head, tail) = safe Stream::head_tail(cursor);
+          Some(head, IterRef(len - 1, tail))
         }
       }
     }
@@ -562,6 +562,13 @@ pub.root mod Stream {
   pub unsafe fn tail[T](&front: &Hole[Stream[T]]) -> &Hole[Stream[T]] {
     let &Stream::more(_, tail) = front.as_ref();
     &tail
+  }
+
+  /// Borrows the head and the tail of a stream at once, so that the tail can be
+  /// used before the head is released.
+  pub unsafe fn head_tail[T](&front: &Hole[Stream[T]]) -> (&T, &Hole[Stream[T]]) {
+    let &Stream::more(head, tail) = front.as_ref();
+    (&head, &tail)
   }
 
   /// Closes an empty stream, `front` being its front and `back` the hole at

@@ -159,6 +159,12 @@ impl<'a> Layouter<'a> {
         let sig = &sigs.unions[*id];
         union(&self.variant_layouts(&sig.types, sig.inner.variant_data.values(), children)?)
       }
+      // The frames runtime has no debug mode.
+      LayoutKind::IfConst(id)
+        if Some(self.chart.concrete_consts[*id].def) == self.chart.builtins.debug_enabled =>
+      {
+        self.term_layout(children[1].clone())?
+      }
       LayoutKind::IfConst(_) => {
         let branches = children
           .iter()
