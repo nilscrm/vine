@@ -1364,6 +1364,12 @@ impl UnitBuilder<'_, '_> {
     }
     let spec = self.e.specs.spec(spec);
     match &spec.kind {
+      // The frames runtime has no debug mode.
+      SpecKind::Fragment(fragment)
+        if Some(self.e.fragments[*fragment].def) == self.e.chart.builtins.debug_enabled =>
+      {
+        Some(false)
+      }
       SpecKind::Fragment(fragment) => {
         let vir = &self.e.vir[*fragment];
         let stage = vir.stages.values().next()?;
@@ -2177,10 +2183,11 @@ impl UnitBuilder<'_, '_> {
       return;
     }
     let reader_info = self.port_info(reader);
-    match (self.is_box(info.ty), self.is_box(reader_info.ty)) {
-      (true, false) => return self.emit_box(writer, reader),
-      (false, true) => return self.emit_unbox(writer, reader),
-      _ => {}
+    if self.boxes(info.ty, reader_info.ty) {
+      return self.emit_box(writer, reader);
+    }
+    if self.boxes(reader_info.ty, info.ty) {
+      return self.emit_unbox(writer, reader);
     }
     // A `Rewrap` may change the layout, e.g. between a union and one of its
     // variants; then the value is padded or truncated.
@@ -2242,9 +2249,16 @@ impl UnitBuilder<'_, '_> {
     }
   }
 
-  fn is_box(&self, ty: Type) -> bool {
+  /// Whether `outer` is `Box[inner]`.
+  fn boxes(&self, outer: Type, inner: Type) -> bool {
     let box_ = self.e.chart.builtins.box_;
-    matches!(self.vir.types.kind(ty), Some((_, TypeKind::Struct(id, ..))) if Some(*id) == box_)
+    let types = &self.vir.types;
+    match types.kind(outer) {
+      Some((_, TypeKind::Struct(id, _, params))) if Some(*id) == box_ => {
+        types.show(self.e.chart, params[0]) == types.show(self.e.chart, inner)
+      }
+      _ => false,
+    }
   }
 
   /// Boxes a value: a box is a hole holding its contents.

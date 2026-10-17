@@ -8,6 +8,7 @@ use util::{forget, unreachable};
 pub mod Show;
 
 /// Whether debug mode is enabled.
+#[builtin = "debug_enabled"]
 pub const enabled: Bool = debug_state() is Some(_);
 
 #[frameless]

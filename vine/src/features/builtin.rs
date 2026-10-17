@@ -66,6 +66,7 @@ pub struct Builtins {
   pub default: Option<TraitId>,
 
   pub debug_state: Option<FnId>,
+  pub debug_enabled: Option<DefId>,
 
   pub show: Option<TraitId>,
   pub repl_show: Option<FnId>,
@@ -144,6 +145,9 @@ impl Charter<'_> {
       "Opaque" => set(&mut b.opaque, trait_id),
       "Default" => set(&mut b.default, trait_id),
       "debug_state" => set(&mut b.debug_state, fn_id),
+      "debug_enabled" => {
+        set(&mut b.debug_enabled, if let ChartedItem::Const(def, _) = item { Some(def) } else { None })
+      }
       "Show" => set(&mut b.show, trait_id),
       "repl_show" => set(&mut b.repl_show, fn_id),
       "add" => binary_op(b, BinaryOp::Add, fn_id),

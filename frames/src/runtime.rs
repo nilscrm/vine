@@ -1,5 +1,5 @@
 use std::{
-  collections::HashSet,
+  collections::{HashMap, HashSet},
   error::Error,
   fmt,
   io::{self, Read, Write},
@@ -11,7 +11,7 @@ use vine_util::idx::IdxVec;
 use crate::{
   heap::{Addr, Heap},
   ops::{Op, Ops},
-  program::{BlockId, Instr, IoOp, OpId, Program, Reg},
+  program::{BlockId, Instr, IoOp, OpId, Program, Reg, Unit},
 };
 
 /// A frame header holds the number of words still to be written (plus one for
@@ -92,6 +92,8 @@ pub struct Runtime<'p, 'h> {
   pub trace: bool,
   /// With `trace`, the frames and holes which have not run yet.
   waiting: HashSet<Addr>,
+  /// With `trace`, the value sizes of the holes which have not run yet.
+  hole_sizes: HashMap<Addr, u32>,
 }
 
 impl<'p, 'h> Runtime<'p, 'h> {
@@ -116,6 +118,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
       scratch: Vec::new(),
       trace: false,
       waiting: HashSet::new(),
+      hole_sizes: HashMap::new(),
     })
   }
 
@@ -159,12 +162,18 @@ impl<'p, 'h> Runtime<'p, 'h> {
   }
 
   fn fill(&mut self, frame: Addr, offset: u32, src: Reg, len: u32) {
+    if self.trace && len != 0 && !self.waiting.contains(&frame) {
+      eprintln!("trace: write into {} at offset {offset}, which is not waiting", frame.0);
+    }
     let src = &self.regs[src.0 as usize..][..len as usize];
     self.heap.slice_mut(frame.offset(offset), len).copy_from_slice(src);
     self.decrement(frame, len);
   }
 
   fn fill_words(&mut self, frame: Addr, offset: u32, words: &[u64]) {
+    if self.trace && !words.is_empty() && !self.waiting.contains(&frame) {
+      eprintln!("trace: write into {} at offset {offset}, which is not waiting", frame.0);
+    }
     self.heap.slice_mut(frame.offset(offset), words.len() as u32).copy_from_slice(words);
     self.decrement(frame, words.len() as u32);
   }
@@ -273,6 +282,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
           self.regs[dst.0 as usize] = hole.0;
           if self.trace {
             self.waiting.insert(hole);
+            self.hole_sizes.insert(hole, *len);
           }
         }
         Instr::HoleOf { dst, src, len } => {
@@ -283,10 +293,12 @@ impl<'p, 'h> Runtime<'p, 'h> {
           self.regs[dst.0 as usize] = hole.0;
           if self.trace {
             self.waiting.insert(hole);
+            self.hole_sizes.insert(hole, *len);
           }
         }
         Instr::HoleForward { hole, space, len } => {
           let hole = self.addr(*hole);
+          self.check_hole(hole, *len, unit, pc);
           let header = self.heap.get(hole);
           if header & CODE_MASK != CODE_NONE {
             Err(RuntimeError::HoleMisuse)?
@@ -301,6 +313,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
         }
         Instr::HoleTake { hole, dst, len, ok } => {
           let hole = self.addr(*hole);
+          self.check_hole(hole, *len, unit, pc);
           let header = self.heap.get(hole);
           if header & CODE_MASK != CODE_NONE {
             Err(RuntimeError::HoleMisuse)?
@@ -332,6 +345,15 @@ impl<'p, 'h> Runtime<'p, 'h> {
         Instr::Panic { msg } => Err(RuntimeError::Panic(msg.clone()))?,
       }
       pc += 1;
+    }
+  }
+
+  /// With `trace`, reports a hole used with the wrong size, or which is not a
+  /// hole.
+  fn check_hole(&self, hole: Addr, len: u32, unit: &Unit, pc: usize) {
+    if self.trace && self.hole_sizes.get(&hole) != Some(&len) {
+      let size = self.hole_sizes.get(&hole);
+      eprintln!("trace: hole {} of size {size:?} used with size {len} in {} at {pc}", hole.0, unit.name);
     }
   }
 
