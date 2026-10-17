@@ -1,4 +1,5 @@
 use std::{
+  collections::HashSet,
   error::Error,
   fmt,
   io::{self, Read, Write},
@@ -86,8 +87,11 @@ pub struct Runtime<'p, 'h> {
   ready: Vec<Addr>,
   halted: bool,
   scratch: Vec<u64>,
-  /// Whether to print each block as it is run.
+  /// Whether to print each block as it is run, and the frames and holes still
+  /// waiting if the program deadlocks.
   pub trace: bool,
+  /// With `trace`, the frames and holes which have not run yet.
+  waiting: HashSet<Addr>,
 }
 
 impl<'p, 'h> Runtime<'p, 'h> {
@@ -111,6 +115,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
       halted: false,
       scratch: Vec::new(),
       trace: false,
+      waiting: HashSet::new(),
     })
   }
 
@@ -124,6 +129,9 @@ impl<'p, 'h> Runtime<'p, 'h> {
     self.host.stdout.flush().map_err(|e| RuntimeError::Io(e.to_string()))?;
     result?;
     if !self.halted {
+      if self.trace {
+        self.print_waiting();
+      }
       Err(RuntimeError::Deadlock { waiting: self.heap.live_objects() })?
     }
     Ok(())
@@ -141,6 +149,9 @@ impl<'p, 'h> Runtime<'p, 'h> {
     let frame = self.heap.alloc(size + 1);
     self.heap.set(frame, ((size as u64) << COUNTER_SHIFT) | block_id.0 as u64);
     self.stats.frames += 1;
+    if self.trace {
+      self.waiting.insert(frame);
+    }
     if size == 0 {
       self.ready.push(frame);
     }
@@ -184,8 +195,9 @@ impl<'p, 'h> Runtime<'p, 'h> {
     let unit = &program.units[block.unit];
     self.stats.blocks_run += 1;
     if self.trace {
+      self.waiting.remove(&frame);
       let words = self.heap.slice(frame.offset(1), block.frame_size());
-      eprintln!("run b{} ({} @ {:?}) {words:?}", code, unit.name, block.entry);
+      eprintln!("run b{} ({} @ {:?}) at {}: {words:?}", code, unit.name, block.entry, frame.0);
     }
     if self.regs.len() < unit.regs as usize {
       self.regs.resize(unit.regs as usize, 0);
@@ -259,6 +271,9 @@ impl<'p, 'h> Runtime<'p, 'h> {
           let hole = self.heap.alloc(hole_size(*len));
           self.heap.set(hole, ((*len as u64 + 1) << COUNTER_SHIFT) | CODE_NONE);
           self.regs[dst.0 as usize] = hole.0;
+          if self.trace {
+            self.waiting.insert(hole);
+          }
         }
         Instr::HoleOf { dst, src, len } => {
           let hole = self.heap.alloc(hole_size(*len));
@@ -266,6 +281,9 @@ impl<'p, 'h> Runtime<'p, 'h> {
           let src = &self.regs[src.0 as usize..][..*len as usize];
           self.heap.slice_mut(hole.offset(1), *len).copy_from_slice(src);
           self.regs[dst.0 as usize] = hole.0;
+          if self.trace {
+            self.waiting.insert(hole);
+          }
         }
         Instr::HoleForward { hole, space, len } => {
           let hole = self.addr(*hole);
@@ -292,6 +310,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
             let words = self.heap.slice(hole.offset(1), *len);
             self.regs[dst.0 as usize..][..*len as usize].copy_from_slice(words);
             self.heap.free(hole, hole_size(*len));
+            self.waiting.remove(&hole);
           }
           self.regs[ok.0 as usize] = filled as u64;
         }
@@ -316,6 +335,27 @@ impl<'p, 'h> Runtime<'p, 'h> {
     }
   }
 
+  /// Prints the frames and holes still waiting, with the number of words (or
+  /// code) they are missing.
+  fn print_waiting(&self) {
+    let mut waiting = self.waiting.iter().copied().collect::<Vec<_>>();
+    waiting.sort_by_key(|addr| addr.0);
+    for addr in waiting {
+      let header = self.heap.get(addr);
+      let missing = header >> COUNTER_SHIFT;
+      let code = header & CODE_MASK;
+      if code == CODE_NONE {
+        eprintln!("waiting: hole at {}, missing {missing}", addr.0);
+      } else if code & CODE_FORWARD != 0 {
+        eprintln!("waiting: forwarding hole at {}, missing {missing}", addr.0);
+      } else {
+        let block = &self.program.blocks[BlockId(code as usize)];
+        let unit = &self.program.units[block.unit].name;
+        eprintln!("waiting: b{code} ({unit} @ {:?}) at {}, missing {missing}", block.entry, addr.0);
+      }
+    }
+  }
+
   fn addr(&self, reg: Reg) -> Addr {
     Addr(self.regs[reg.0 as usize])
   }
@@ -326,6 +366,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
     let words = self.heap.slice(hole.offset(1), len).to_vec();
     let space = self.heap.get(hole.offset(len + 1));
     self.heap.free(hole, hole_size(len));
+    self.waiting.remove(&hole);
     let (frame, offset) = decode_space(space);
     self.fill_words(frame, offset, &words);
   }
