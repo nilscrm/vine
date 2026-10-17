@@ -237,6 +237,11 @@ impl VineRunCommand {
       let result = compiler.frames_program();
       eprint_diags(&compiler);
       let Ok(program) = result else { exit(1) };
+      if env::var("FRAMES_CHECK").is_ok() {
+        for error in program.check_registers() {
+          eprintln!("frames check: {error}");
+        }
+      }
       if env::var("FRAMES_DUMP").is_ok() {
         eprintln!("{program}");
       }

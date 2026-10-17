@@ -712,10 +712,19 @@ impl UnitBuilder<'_, '_> {
           // The local's final value is a space, which the hole's value is
           // forwarded into.
           let (space, _) = self.local_value(local);
-          self.require(space, 1);
-          self.materialize(space);
           self.locals[local] = LocalState::Empty;
-          self.code.push(Instr::HoleForward { hole, space, len });
+          if self.remote(space, 1) {
+            // The space is not available yet; a task forwards the value into
+            // it once it is.
+            let mut task = self.new_task();
+            let space = self.task_input(&mut task, space, 1);
+            let hole = self.task_input(&mut task, hole, 1);
+            task.code.push(Instr::HoleForward { hole, space, len });
+            self.finish_task(task);
+          } else {
+            self.materialize(space);
+            self.code.push(Instr::HoleForward { hole, space, len });
+          }
         }
         (AtEnd::Write(space), _) => {
           let (reg, len) = self.local_value(local);
@@ -1559,12 +1568,23 @@ impl UnitBuilder<'_, '_> {
         }
         self.write_value(ret, reg, size);
       }
-      SyntheticItem::Identity
-      | SyntheticItem::CompositeDeconstruct(_)
-      | SyntheticItem::CompositeReconstruct(_) => {
+      SyntheticItem::Identity | SyntheticItem::CompositeDeconstruct(_) => {
         // These only reinterpret a value's words.
         let (reg, len) = self.read_value(&args[0]);
         self.write_value(ret, reg, len);
+      }
+      SyntheticItem::CompositeReconstruct(_) => {
+        // The composite's words are those of its first field, followed by those
+        // of the rest.
+        let size = self.port_info(ret).layout.size;
+        let out = self.alloc(size);
+        let mut offset = 0;
+        for arg in args {
+          let (reg, len) = self.read_value(arg);
+          self.move_regs(out.offset(offset), reg, len);
+          offset += len;
+        }
+        self.write_value(ret, out, size);
       }
       SyntheticItem::String(string) => {
         let list = self.build_list(1, string.chars().map(ListPart::Char).collect());
@@ -2819,6 +2839,16 @@ impl UnitBuilder<'_, '_> {
         self.unwritten.remove(&target);
         self.move_regs(target, src.offset(i as u32), 1);
       }
+      return;
+    }
+    if self.remote(space, 1) {
+      // The space is not available yet; a task writes the value into it once
+      // it is.
+      let mut task = self.new_task();
+      let space = self.task_input(&mut task, space, 1);
+      let src = self.task_input(&mut task, src, len);
+      task.code.push(Instr::Write { space, src, len });
+      self.finish_task(task);
       return;
     }
     // Parts of the value which will themselves be written through virtual

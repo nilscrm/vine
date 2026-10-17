@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
 
 use vine_util::{idx::IdxVec, new_idx};
 
@@ -254,6 +254,92 @@ impl IoOp {
       IoOp::Flush => (1, 1),
       IoOp::ReadChar | IoOp::ReadByte | IoOp::Ready => (1, 2),
     }
+  }
+}
+
+impl Instr {
+  /// The registers the instruction reads, and the registers it writes.
+  pub fn regs(&self) -> (Vec<Reg>, Vec<Reg>) {
+    let range = |reg: Reg, len: u32| (0..len).map(move |i| reg.offset(i));
+    match self {
+      Instr::Const { dst, .. } => (vec![], vec![*dst]),
+      Instr::Move { dst, src, len } => (range(*src, *len).collect(), range(*dst, *len).collect()),
+      Instr::Op { args, rets, .. } | Instr::Io { args, rets, .. } => (args.clone(), rets.clone()),
+      Instr::Alloc { dst, .. } => (vec![], vec![*dst]),
+      Instr::Free { ptr, .. } => (vec![*ptr], vec![]),
+      Instr::Load { dst, ptr, len, .. } => (vec![*ptr], range(*dst, *len).collect()),
+      Instr::Store { ptr, src, len, .. } => {
+        ([*ptr].into_iter().chain(range(*src, *len)).collect(), vec![])
+      }
+      Instr::NewFrame { dst, .. } => (vec![], vec![*dst]),
+      Instr::Fill { frame, src, len, .. } => {
+        ([*frame].into_iter().chain(range(*src, *len)).collect(), vec![])
+      }
+      Instr::Space { dst, frame, .. } => (vec![*frame], vec![*dst]),
+      Instr::Write { space, src, len } => {
+        ([*space].into_iter().chain(range(*src, *len)).collect(), vec![])
+      }
+      Instr::Split { space, dsts, .. } => (vec![*space], dsts.clone()),
+      Instr::HoleNew { dst, .. } => (vec![], vec![*dst]),
+      Instr::HoleOf { dst, src, len } => (range(*src, *len).collect(), vec![*dst]),
+      Instr::HoleForward { hole, space, .. } => (vec![*hole, *space], vec![]),
+      Instr::HoleTake { hole, dst, len, ok } => {
+        (vec![*hole], range(*dst, *len).chain([*ok]).collect())
+      }
+      Instr::Branch { cond, .. } => (vec![*cond], vec![]),
+      Instr::Switch { tag, .. } => (vec![*tag], vec![]),
+      Instr::Jump { .. } | Instr::End | Instr::Halt | Instr::Panic { .. } => (vec![], vec![]),
+    }
+  }
+}
+
+impl Program {
+  /// Checks that every block only reads registers which are loaded from its
+  /// frame, or written by earlier instructions of the block; returns a
+  /// description of each violation.
+  pub fn check_registers(&self) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (block_id, block) in self.blocks.iter() {
+      let Some(unit) = self.units.get(block.unit) else { continue };
+      // The registers which are certainly written at each label reached.
+      let mut written: Vec<Option<BTreeSet<Reg>>> = vec![None; unit.code.len()];
+      let mut queue = vec![(block.entry.0 as usize, block.frame.iter().copied().collect())];
+      while let Some((pc, regs)) = queue.pop() {
+        let Some(instr) = unit.code.get(pc) else { continue };
+        let regs: BTreeSet<Reg> = match &written[pc] {
+          Some(old) if old.is_subset(&regs) => continue,
+          Some(old) => old.intersection(&regs).copied().collect(),
+          None => regs,
+        };
+        written[pc] = Some(regs.clone());
+        let (reads, writes) = instr.regs();
+        for reg in reads {
+          if !regs.contains(&reg) {
+            errors.push(format!(
+              "{block_id:?} ({}) reads {reg:?} at {pc} ({instr:?}) before it is written",
+              unit.name
+            ));
+          }
+        }
+        let mut regs = regs;
+        regs.extend(writes);
+        match instr {
+          Instr::Jump { target } => queue.push((target.0 as usize, regs)),
+          Instr::Branch { then, else_, .. } => {
+            queue.push((then.0 as usize, regs.clone()));
+            queue.push((else_.0 as usize, regs));
+          }
+          Instr::Switch { targets, .. } => {
+            queue.extend(targets.iter().map(|target| (target.0 as usize, regs.clone())));
+          }
+          Instr::End | Instr::Panic { .. } => {}
+          _ => queue.push((pc + 1, regs)),
+        }
+      }
+    }
+    errors.sort();
+    errors.dedup();
+    errors
   }
 }
 
