@@ -420,6 +420,7 @@ impl UnitBuilder<'_, '_> {
     for (local, hole) in self.lazy_inputs.get(&stage.interface).cloned().unwrap_or_default() {
       let (reg, len) = self.local_regs(local);
       self.hold_regs(hole, (0..len).map(|i| reg.offset(i)).collect());
+      self.locals[local] = LocalState::Valid;
       self.lazy_locals.push(local);
     }
 
@@ -1131,57 +1132,6 @@ impl UnitBuilder<'_, '_> {
       }
     }
 
-    // Locals whose values are produced by code after this transfer (e.g. a
-    // local whose final value is read before it is written, or which is
-    // borrowed by a reference the target takes), or which were passed to this
-    // stage in holes, are passed in holes, so that only the code which reads
-    // them waits for them. Other locals are waited for here.
-    let lazy = match self.lazy_inputs.get(&transfer.interface) {
-      Some(lazy) => lazy.clone(),
-      None => {
-        let mut lazy = Vec::new();
-        for (&local, &(input, _, _)) in &interface.wires {
-          let (reg, len) = self.local_regs(local);
-          let waits = self.locals[local] == LocalState::Empty
-            || (0..len).any(|i| self.unwritten.contains_key(&reg.offset(i)))
-            || (self.lazy_locals.contains(&local) && self.local_waits(local));
-          if input && len != 0 && waits {
-            lazy.push((local, self.alloc(1)));
-          }
-        }
-        self.lazy_inputs.insert(transfer.interface, lazy.clone());
-        lazy
-      }
-    };
-    for &(local, canonical) in &lazy {
-      let hole = if self.locals[local] == LocalState::Empty {
-        // Its value once the current scope ends.
-        let (_, len) = self.local_regs(local);
-        let hole = self.alloc(1);
-        self.code.push(Instr::HoleNew { dst: hole, len });
-        let space = self.alloc(1);
-        self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
-        self.at_end.push((local, AtEnd::Write(space)));
-        hole
-      } else {
-        let (reg, len) = self.local_value(local);
-        self.locals[local] = LocalState::Empty;
-        self.hole_holding(reg, len)
-      };
-      self.code.push(Instr::Move { dst: canonical, src: hole, len: 1 });
-      self.temps.push((canonical, 1));
-    }
-
-    // Pass the locals the target needs; they are kept in their registers.
-    // Virtual spaces only exist while the current stage is emitted, so they
-    // are made real.
-    for (&local, &(input, _, _)) in &interface.wires {
-      if input && self.locals[local] != LocalState::Empty {
-        let (reg, len) = self.local_value(local);
-        self.materialize_range(reg, len);
-        self.resolve(reg, len);
-      }
-    }
     let mut preserved = Vec::new();
     if !child {
       // The stage ends here. Locals the target takes are passed on; outputs
@@ -1202,14 +1152,79 @@ impl UnitBuilder<'_, '_> {
         matches!(interface.wires.get(&local), Some(&(true, _, _))) || preserved.contains(&local)
       };
       self.emit_at_end_except(|_, local| keep(local));
+    }
+
+    // Locals whose values are produced by code after this transfer (e.g. a
+    // local whose final value is read before it is written, or which is
+    // borrowed by a reference the target takes), or which were passed to this
+    // stage in holes, are passed in holes, so that only the code which reads
+    // them waits for them. Other locals are waited for here. All transfers into
+    // an interface agree on which locals are passed in holes.
+    let lazy = match self.lazy_inputs.get(&transfer.interface) {
+      Some(lazy) => lazy.clone(),
+      None => {
+        let mut lazy = Vec::new();
+        for local in self.locals.keys().collect::<Vec<_>>() {
+          let input = matches!(interface.wires.get(&local), Some(&(true, _, _)));
+          if !input && !(!child && preserved.contains(&local)) {
+            continue;
+          }
+          let (reg, len) = self.local_regs(local);
+          let waits = (input && self.locals[local] == LocalState::Empty)
+            || (self.locals[local] != LocalState::Empty
+              && ((0..len).any(|i| self.unwritten.contains_key(&reg.offset(i)))
+                || (self.lazy_locals.contains(&local) && self.local_waits(local))));
+          if len != 0 && waits {
+            lazy.push((local, self.alloc(1)));
+          }
+        }
+        self.lazy_inputs.insert(transfer.interface, lazy.clone());
+        lazy
+      }
+    };
+    if !child {
+      // Spaces for final values of locals which the target writes.
       for &(_, action) in &self.at_end.clone() {
         self.materialize(action.reg());
       }
+    }
+    for &(local, canonical) in &lazy {
+      let hole = if self.locals[local] == LocalState::Empty {
+        // Its value once the current scope ends.
+        let (_, len) = self.local_regs(local);
+        let hole = self.alloc(1);
+        self.code.push(Instr::HoleNew { dst: hole, len });
+        let space = self.alloc(1);
+        self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
+        self.at_end.push((local, AtEnd::Write(space)));
+        hole
+      } else {
+        let (reg, len) = self.local_value(local);
+        self.locals[local] = LocalState::Empty;
+        self.hole_holding(reg, len)
+      };
+      self.code.push(Instr::Move { dst: canonical, src: hole, len: 1 });
+      self.temps.push((canonical, 1));
+    }
+
+    // Pass the locals the target needs; they are kept in their registers.
+    // Holds and virtual spaces only exist while the current stage is emitted,
+    // so they are resolved and made real.
+    for (&local, &(input, _, _)) in &interface.wires {
+      if input && self.locals[local] != LocalState::Empty {
+        let (reg, len) = self.local_value(local);
+        self.materialize_range(reg, len);
+        self.resolve(reg, len);
+      }
+    }
+    if !child {
+      let keep = |local: Local| {
+        matches!(interface.wires.get(&local), Some(&(true, _, _))) || preserved.contains(&local)
+      };
       for local in self.locals.keys().collect::<Vec<_>>() {
         if !keep(local) {
           self.drop_local(local);
         } else if self.locals[local] != LocalState::Empty {
-          // Holds and virtual spaces do not carry over to other stages.
           let (reg, len) = self.local_value(local);
           self.materialize_range(reg, len);
           self.resolve(reg, len);
@@ -2162,6 +2177,11 @@ impl UnitBuilder<'_, '_> {
       return;
     }
     let reader_info = self.port_info(reader);
+    match (self.is_box(info.ty), self.is_box(reader_info.ty)) {
+      (true, false) => return self.emit_box(writer, reader),
+      (false, true) => return self.emit_unbox(writer, reader),
+      _ => {}
+    }
     // A `Rewrap` may change the layout, e.g. between a union and one of its
     // variants; then the value is padded or truncated.
     let same = reader_info.layout.size == info.layout.size;
@@ -2220,6 +2240,61 @@ impl UnitBuilder<'_, '_> {
     } else {
       self.write_value(writer, reg, size);
     }
+  }
+
+  fn is_box(&self, ty: Type) -> bool {
+    let box_ = self.e.chart.builtins.box_;
+    matches!(self.vir.types.kind(ty), Some((_, TypeKind::Struct(id, ..))) if Some(*id) == box_)
+  }
+
+  /// Boxes a value: a box is a hole holding its contents.
+  fn emit_box(&mut self, writer: &Port, reader: &Port) {
+    let info = self.port_info(reader);
+    let len = info.layout.size;
+    let hole = match info.key {
+      Some(key) if len != 0 && !self.wires.contains_key(&key) => {
+        // The contents are produced later; they are written into the hole.
+        let hole = self.alloc(1);
+        self.code.push(Instr::HoleNew { dst: hole, len });
+        let space = self.alloc(1);
+        self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
+        self.wire_reader_space(reader, space);
+        hole
+      }
+      _ => {
+        let (reg, len) = self.read_value(reader);
+        self.hole_holding(reg, len)
+      }
+    };
+    self.write_value(writer, hole, 1);
+  }
+
+  /// Unboxes a value; the contents are held by the box's hole.
+  fn emit_unbox(&mut self, writer: &Port, reader: &Port) {
+    let (handle, _) = self.read_value(reader);
+    let len = self.port_info(writer).layout.size;
+    let out = self.alloc(len);
+    let hole = if self.remote(handle, 1) {
+      // The box is not available yet; a task forwards its contents into a
+      // new hole once it is.
+      let hole = self.alloc(1);
+      self.code.push(Instr::HoleNew { dst: hole, len });
+      let space = self.alloc(1);
+      self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
+      let mut task = self.new_task();
+      let handle = self.task_input(&mut task, handle, 1);
+      let space = self.task_input(&mut task, space, 1);
+      task.code.push(Instr::HoleForward { hole: handle, space, len });
+      self.finish_task(task);
+      hole
+    } else {
+      handle
+    };
+    self.hold_regs(hole, (0..len).map(|i| out.offset(i)).collect());
+    if len == 0 {
+      self.discard_held_hole(hole, 0);
+    }
+    self.write_value(writer, out, len);
   }
 
   /// Of two ports connected by a step, whether the first one is the writer.
@@ -2523,6 +2598,11 @@ impl UnitBuilder<'_, '_> {
   fn hole_holding(&mut self, reg: Reg, len: u32) -> Reg {
     self.align_holes(reg, len);
     match self.runs(reg, len)[..] {
+      [] => {
+        let hole = self.alloc(1);
+        self.code.push(Instr::HoleOf { dst: hole, src: reg, len: 0 });
+        hole
+      }
       [(0, run_len, Run::Held)] if run_len == len => self.take_held(reg, len),
       [(0, run_len, Run::Virtual)] if run_len == len => {
         let (space, _) = self.unwritten[&reg];
@@ -2808,15 +2888,20 @@ impl UnitBuilder<'_, '_> {
         for target in &targets {
           self.held.remove(target);
         }
-        let len = targets.len() as u32;
-        let block = self.e.discard_block(len);
-        let frame = self.alloc(1);
-        self.code.push(Instr::NewFrame { dst: frame, block });
-        let space = self.alloc(1);
-        self.code.push(Instr::Space { dst: space, frame, offset: 1 });
-        self.code.push(Instr::HoleForward { hole, space, len });
+        self.discard_held_hole(hole, targets.len() as u32);
       }
     }
+  }
+
+  /// Frees a hole, discarding its value of `len` words once it arrives.
+  fn discard_held_hole(&mut self, hole: Reg, len: u32) {
+    self.holes.remove(&hole);
+    let block = self.e.discard_block(len);
+    let frame = self.alloc(1);
+    self.code.push(Instr::NewFrame { dst: frame, block });
+    let space = self.alloc(1);
+    self.code.push(Instr::Space { dst: space, frame, offset: 1 });
+    self.code.push(Instr::HoleForward { hole, space, len });
   }
 
   /// Whether the value of the wire, produced by the step at `from`, is only
