@@ -1529,21 +1529,31 @@ impl UnitBuilder<'_, '_> {
       Some(Intrinsic::Duplicate) => {
         let [CallArg::Ref(reg, len)] = args[..] else { unreachable!() };
         let (copy, _) = ret.unwrap();
-        if self.remote(reg, len) {
-          // The value is not available yet; a task copies it once it is.
-          let mut task = self.new_task();
-          let value = self.task_input(&mut task, reg, len);
-          let original = self.task_output(&mut task, reg, len);
-          let copied = self.task_output(&mut task, copy, len);
-          task.code.push(Instr::Write { space: original, src: value, len });
-          task.code.push(Instr::Write { space: copied, src: value, len });
-          self.finish_task(task);
-        } else {
-          self.code.push(Instr::Move { dst: copy, src: reg, len });
+        self.duplicate(reg, len, copy);
+      }
+      Some(Intrinsic::Erase | Intrinsic::Forget) => {
+        // Holes holding the value are still read, to free them.
+        if let [CallArg::Regs(reg, len)] = args[..] {
+          self.discard_held(reg, len);
         }
       }
-      Some(Intrinsic::Erase | Intrinsic::Forget) => {}
       _ => self.call(span, CallTarget::Rel(rel), args, ret.map(|(r, l)| CallRet::Regs(r, l))),
+    }
+  }
+
+  /// Copies plain data into `copy`.
+  fn duplicate(&mut self, reg: Reg, len: u32, copy: Reg) {
+    if self.remote(reg, len) {
+      // The value is not available yet; a task copies it once it is.
+      let mut task = self.new_task();
+      let value = self.task_input(&mut task, reg, len);
+      let original = self.task_output(&mut task, reg, len);
+      let copied = self.task_output(&mut task, copy, len);
+      task.code.push(Instr::Write { space: original, src: value, len });
+      task.code.push(Instr::Write { space: copied, src: value, len });
+      self.finish_task(task);
+    } else {
+      self.code.push(Instr::Move { dst: copy, src: reg, len });
     }
   }
 
@@ -2487,6 +2497,8 @@ impl UnitBuilder<'_, '_> {
       }
       Some(WireState::Discard) => {
         self.wires.insert(key, WireState::Consumed);
+        // Holes holding the value are still read, to free them.
+        self.discard_held(reg, len);
       }
       Some(state) => {
         unreachable!(
@@ -2814,6 +2826,7 @@ impl UnitBuilder<'_, '_> {
   /// writes, and runs the step once they have all arrived. The code emitting it
   /// goes on without waiting.
   fn emit_detached(&mut self, index: usize, step: &Step) {
+    let echoes = self.is_op(step);
     let mut task = self.new_task();
     let mut flow = Flow::default();
     for port in step.ports() {
@@ -2836,6 +2849,25 @@ impl UnitBuilder<'_, '_> {
         let reg = self.alloc(len);
         task.map.extend((0..len).map(|i| reg.offset(i)));
         flow.wires.insert(key, WireState::Value(reg, len));
+      } else if echoes && self.is_ref(info.ty) {
+        // An operation only reads the value behind a reference, and writes it
+        // back unchanged. It is written back now, so that values which depend
+        // on it (e.g. another reference to the same local) need not wait for
+        // the task; the task gets a copy, and writes back into nothing.
+        let (src, len) = self.read_value(port);
+        let (space, len) = (src.offset(len - 1), len - 1);
+        let copy = self.alloc(len);
+        self.duplicate(src, len, copy);
+        self.emit_write(space, src, len);
+        let reg = self.alloc(len + 1);
+        self.emit_fill(task.frame, task.offset(), copy, len);
+        task.map.extend((0..len).map(|i| reg.offset(i)));
+        let unused = self.alloc(len);
+        for i in 0..len {
+          flow.unwritten.insert(unused.offset(i), (reg.offset(len), i as usize));
+        }
+        flow.virtual_spaces.insert(reg.offset(len), (0..len).map(|i| unused.offset(i)).collect());
+        flow.wires.insert(key, WireState::Value(reg, len + 1));
       } else {
         let (src, len) = self.read_value(port);
         let reg = self.task_input(&mut task, src, len);
@@ -2850,6 +2882,42 @@ impl UnitBuilder<'_, '_> {
     debug_assert!(flow.pending.is_empty() && flow.virtual_spaces.is_empty());
     task.code = take(&mut flow.code);
     self.finish_task(task);
+  }
+
+  /// Whether a step is a primitive operation (see `emit_op`).
+  fn is_op(&self, step: &Step) -> bool {
+    let Step::Call(_, rel, _, _) = step else { return false };
+    let Ok((callee, _)) = self.e.specs.spec(self.spec_id).rels.fns[*rel] else { return false };
+    self.e.intrinsic(callee).is_some_and(|intrinsic| {
+      use Intrinsic::*;
+      !matches!(
+        intrinsic,
+        Duplicate
+          | F64Fork
+          | Erase
+          | Forget
+          | F64Drop
+          | Transmute
+          | BlackBox
+          | Unreachable
+          | Panic
+          | IoPrintChar
+          | IoPrintByte
+          | IoFlush
+          | IoReadChar
+          | IoReadByte
+          | IoReady
+          | HoleNew
+          | HoleOf
+          | HoleGet
+          | HoleForward
+          | HoleAsRef
+      )
+    })
+  }
+
+  fn is_ref(&self, ty: Type) -> bool {
+    matches!(self.vir.types.kind(ty), Some((_, TypeKind::Ref(_))))
   }
 
   fn swap_flow(&mut self, flow: &mut Flow) {
@@ -2896,6 +2964,13 @@ impl UnitBuilder<'_, '_> {
   /// values once they arrive.
   fn discard_held(&mut self, reg: Reg, len: u32) {
     self.align_holes(reg, len);
+    // Values which will be written through virtual spaces are held, so that
+    // they are freed too.
+    for i in 0..len {
+      if let Some(&(space, _)) = self.unwritten.get(&reg.offset(i)) {
+        self.hold(space);
+      }
+    }
     for i in 0..len {
       if let Some(&(hole, _)) = self.held.get(&reg.offset(i)) {
         let targets = self.holes.remove(&hole).unwrap();

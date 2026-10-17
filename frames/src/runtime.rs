@@ -92,8 +92,9 @@ pub struct Runtime<'p, 'h> {
   pub trace: bool,
   /// With `trace`, the frames and holes which have not run yet.
   waiting: HashSet<Addr>,
-  /// With `trace`, the value sizes of the holes which have not run yet.
-  hole_sizes: HashMap<Addr, u32>,
+  /// With `trace`, the value sizes of the holes which have not run yet, and
+  /// where they were created.
+  hole_sizes: HashMap<Addr, (u32, String, usize)>,
 }
 
 impl<'p, 'h> Runtime<'p, 'h> {
@@ -131,6 +132,9 @@ impl<'p, 'h> Runtime<'p, 'h> {
     self.stats.time += start.elapsed();
     self.host.stdout.flush().map_err(|e| RuntimeError::Io(e.to_string()))?;
     result?;
+    if self.trace && self.halted && self.heap.live_objects() != 0 {
+      self.print_waiting();
+    }
     if !self.halted {
       if self.trace {
         self.print_waiting();
@@ -282,7 +286,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
           self.regs[dst.0 as usize] = hole.0;
           if self.trace {
             self.waiting.insert(hole);
-            self.hole_sizes.insert(hole, *len);
+            self.hole_sizes.insert(hole, (*len, unit.name.clone(), pc));
           }
         }
         Instr::HoleOf { dst, src, len } => {
@@ -293,7 +297,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
           self.regs[dst.0 as usize] = hole.0;
           if self.trace {
             self.waiting.insert(hole);
-            self.hole_sizes.insert(hole, *len);
+            self.hole_sizes.insert(hole, (*len, unit.name.clone(), pc));
           }
         }
         Instr::HoleForward { hole, space, len } => {
@@ -351,7 +355,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
   /// With `trace`, reports a hole used with the wrong size, or which is not a
   /// hole.
   fn check_hole(&self, hole: Addr, len: u32, unit: &Unit, pc: usize) {
-    if self.trace && self.hole_sizes.get(&hole) != Some(&len) {
+    if self.trace && self.hole_sizes.get(&hole).map(|x| x.0) != Some(len) {
       let size = self.hole_sizes.get(&hole);
       eprintln!("trace: hole {} of size {size:?} used with size {len} in {} at {pc}", hole.0, unit.name);
     }
@@ -367,7 +371,8 @@ impl<'p, 'h> Runtime<'p, 'h> {
       let missing = header >> COUNTER_SHIFT;
       let code = header & CODE_MASK;
       if code == CODE_NONE {
-        eprintln!("waiting: hole at {}, missing {missing}", addr.0);
+        let (_, unit, pc) = &self.hole_sizes[&addr];
+        eprintln!("waiting: hole at {} (from {unit} at {pc}), missing {missing}", addr.0);
       } else if code & CODE_FORWARD != 0 {
         eprintln!("waiting: forwarding hole at {}, missing {missing}", addr.0);
       } else {
