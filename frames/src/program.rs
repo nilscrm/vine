@@ -160,7 +160,8 @@ pub enum Instr {
     frame: Reg,
     offset: u32,
   },
-  /// Fills the slot that `space` points to with `len` words.
+  /// Fills the slot that `space` points to with `len` words. A space into
+  /// frame `0` (e.g. the word `0`) discards what is written into it.
   Write {
     space: Reg,
     src: Reg,

@@ -63,6 +63,7 @@ pub struct Stats {
   pub blocks_run: u64,
   pub instructions: u64,
   pub frames: u64,
+  pub holes: u64,
   pub time: Duration,
 }
 
@@ -90,6 +91,12 @@ pub struct Runtime<'p, 'h> {
   /// Whether to print each block as it is run, and the frames and holes still
   /// waiting if the program deadlocks.
   pub trace: bool,
+  /// Whether to count where frames and holes are created, and which blocks
+  /// run.
+  pub profile: bool,
+  /// With `profile`, the number of objects created at each instruction, and of
+  /// runs of each block.
+  pub counts: HashMap<(String, usize), u64>,
   /// With `trace`, the frames and holes which have not run yet.
   waiting: HashSet<Addr>,
   /// With `trace`, the value sizes of the holes which have not run yet, and
@@ -119,6 +126,8 @@ impl<'p, 'h> Runtime<'p, 'h> {
       scratch: Vec::new(),
       trace: false,
       waiting: HashSet::new(),
+      profile: false,
+      counts: HashMap::new(),
       hole_sizes: HashMap::new(),
     })
   }
@@ -166,6 +175,9 @@ impl<'p, 'h> Runtime<'p, 'h> {
   }
 
   fn fill(&mut self, frame: Addr, offset: u32, src: Reg, len: u32) {
+    if frame.0 == 0 {
+      return;
+    }
     if self.trace && len != 0 && !self.waiting.contains(&frame) {
       eprintln!("trace: write into {} at offset {offset}, which is not waiting", frame.0);
     }
@@ -175,6 +187,9 @@ impl<'p, 'h> Runtime<'p, 'h> {
   }
 
   fn fill_words(&mut self, frame: Addr, offset: u32, words: &[u64]) {
+    if frame.0 == 0 {
+      return;
+    }
     if self.trace && !words.is_empty() && !self.waiting.contains(&frame) {
       eprintln!("trace: write into {} at offset {offset}, which is not waiting", frame.0);
     }
@@ -221,8 +236,19 @@ impl<'p, 'h> Runtime<'p, 'h> {
     self.heap.free(frame, block.frame_size() + 1);
 
     let mut pc = block.entry.0 as usize;
+    if self.profile {
+      *self.counts.entry((format!("run {}", unit.name), block.entry.0 as usize)).or_default() += 1;
+    }
     loop {
       self.stats.instructions += 1;
+      if self.profile
+        && matches!(
+          unit.code[pc],
+          Instr::NewFrame { .. } | Instr::HoleNew { .. } | Instr::HoleOf { .. }
+        )
+      {
+        *self.counts.entry((unit.name.clone(), pc)).or_default() += 1;
+      }
       match &unit.code[pc] {
         Instr::Const { dst, value } => self.regs[dst.0 as usize] = *value,
         Instr::Move { dst, src, len } => {
@@ -282,6 +308,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
 
         Instr::HoleNew { dst, len } => {
           let hole = self.heap.alloc(hole_size(*len));
+          self.stats.holes += 1;
           self.heap.set(hole, ((*len as u64 + 1) << COUNTER_SHIFT) | CODE_NONE);
           self.regs[dst.0 as usize] = hole.0;
           if self.trace {
@@ -291,6 +318,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
         }
         Instr::HoleOf { dst, src, len } => {
           let hole = self.heap.alloc(hole_size(*len));
+          self.stats.holes += 1;
           self.heap.set(hole, (1 << COUNTER_SHIFT) | CODE_NONE);
           let src = &self.regs[src.0 as usize..][..*len as usize];
           self.heap.slice_mut(hole.offset(1), *len).copy_from_slice(src);
