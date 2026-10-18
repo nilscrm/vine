@@ -3,6 +3,7 @@ use frames::{
   runtime::{Host as FramesHost, Runtime},
 };
 use std::{
+  cmp::Reverse,
   collections::HashMap,
   env,
   ffi::OsStr,
@@ -252,7 +253,7 @@ impl VineRunCommand {
       let result = runtime.run();
       if runtime.profile {
         let mut counts = runtime.counts.iter().collect::<Vec<_>>();
-        counts.sort_by_key(|&(key, count)| (std::cmp::Reverse(*count), key.clone()));
+        counts.sort_by_key(|&(key, count)| (Reverse(*count), key.clone()));
         for ((unit, pc), count) in counts.into_iter().take(40) {
           eprintln!("profile: {count:>10} {unit} @ {pc}");
         }

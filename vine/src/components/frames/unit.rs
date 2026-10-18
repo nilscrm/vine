@@ -235,6 +235,7 @@ pub(super) fn emit_unit(
     tasks: Vec::new(),
     open_tasks: Vec::new(),
     in_task: HashMap::new(),
+    reader_tasks: HashMap::new(),
     extra_wires: usize::MAX,
     ret_space: None,
     result: None,
@@ -313,6 +314,9 @@ struct UnitBuilder<'e, 'a> {
   /// Registers whose values are computed by an open task: the task, and the
   /// task's register holding the value.
   in_task: HashMap<Reg, (usize, Reg)>,
+  /// Open tasks created for steps which will read values written into them,
+  /// by the index of the step.
+  reader_tasks: HashMap<usize, usize>,
   /// The id of the next wire created by the emitter, counting down.
   extra_wires: usize,
 
@@ -428,6 +432,7 @@ impl UnitBuilder<'_, '_> {
     self.temps.clear();
     debug_assert!(self.open_tasks.is_empty());
     self.in_task.clear();
+    self.reader_tasks.clear();
 
     let interface = &self.vir.interfaces[stage.interface];
     for (&local, &(input, _, _)) in &interface.wires {
@@ -1658,7 +1663,12 @@ impl UnitBuilder<'_, '_> {
       self.code.push(Instr::Const { dst: reg, value });
       return self.write_value(port, reg, 1);
     }
-    self.call(span, CallTarget::Spec(callee, StageId(0)), vec![], Some(CallRet::Port(port.clone())));
+    self.call(
+      span,
+      CallTarget::Spec(callee, StageId(0)),
+      vec![],
+      Some(CallRet::Port(port.clone())),
+    );
   }
 
   /// The value of a constant which is a literal word, if it is one.
@@ -1693,7 +1703,10 @@ impl UnitBuilder<'_, '_> {
   fn trivial(&self, spec: SpecId) -> bool {
     let SpecKind::Fragment(fragment) = self.e.specs.spec(spec).kind else { return false };
     self.e.vir[fragment].stages.values().all(|stage| {
-      stage.steps.iter().all(|step| !matches!(step, Step::Call(..) | Step::Const(..) | Step::InlineIvy(..)))
+      stage
+        .steps
+        .iter()
+        .all(|step| !matches!(step, Step::Call(..) | Step::Const(..) | Step::InlineIvy(..)))
     })
   }
 
@@ -2572,6 +2585,26 @@ impl UnitBuilder<'_, '_> {
           // The next transfer waits for it anyway, so it arrives where the
           // transfer waits, rather than in a hole.
           self.materialize_cont(space);
+        } else if let Some(reader) = self.strict_reader(key.1, self.step) {
+          // The step reading it will be emitted into a task; the value is
+          // written directly into the task's frame, and the step is emitted
+          // into it (see `task_of`).
+          let task = match self.reader_tasks.get(&reader) {
+            Some(&task) => task,
+            None => {
+              let task = self.new_task();
+              self.open_tasks.push(task);
+              self.reader_tasks.insert(reader, self.open_tasks.len() - 1);
+              self.open_tasks.len() - 1
+            }
+          };
+          self.take_virtual(reg, len);
+          let (frame, offset) = (self.open_tasks[task].frame, self.open_tasks[task].offset());
+          self.code.push(Instr::Space { dst: space, frame, offset });
+          self.open_tasks[task].map.extend((0..len).map(|i| reg.offset(i)));
+          for i in 0..len {
+            self.in_task.insert(reg.offset(i), (task, reg.offset(i)));
+          }
         }
         self.wires.insert(key, WireState::Value(reg, len));
         space
@@ -2603,13 +2636,9 @@ impl UnitBuilder<'_, '_> {
     let mut wire = wire;
     let mut index = from;
     for _ in 0..8 {
-      let Some((i, step)) = stage
-        .steps
-        .iter()
-        .enumerate()
-        .skip(index + 1)
-        .find(|(_, step)| matches!(step, Step::Transfer(_)) || step.ports().any(|p| is_wire(p, wire)))
-      else {
+      let Some((i, step)) = stage.steps.iter().enumerate().skip(index + 1).find(|(_, step)| {
+        matches!(step, Step::Transfer(_)) || step.ports().any(|p| is_wire(p, wire))
+      }) else {
         return false;
       };
       match step {
@@ -2857,10 +2886,17 @@ impl UnitBuilder<'_, '_> {
   /// Whether a step needs values which are not available yet. Such a step is
   /// emitted into a task of its own, so that only it waits for them.
   fn waits(&mut self, step: &Step) -> bool {
-    let inputs: Vec<&Port> = match step {
+    let inputs = self.strict_inputs(step);
+    inputs.into_iter().any(|port| self.port_waits(port))
+  }
+
+  /// The ports whose values a step reads, rather than only passes on; empty if
+  /// it reads none.
+  fn strict_inputs<'s>(&self, step: &'s Step) -> Vec<&'s Port> {
+    match step {
       Step::Call(_, rel, args, _) => {
         let Ok((callee, _)) = self.e.specs.spec(self.spec_id).rels.fns[*rel] else {
-          return false;
+          return vec![];
         };
         let strict = match self.e.intrinsic(callee) {
           Some(intrinsic) => reads_inputs(intrinsic),
@@ -2878,7 +2914,7 @@ impl UnitBuilder<'_, '_> {
           },
         };
         if !strict {
-          return false;
+          return vec![];
         }
         args.iter().collect()
       }
@@ -2886,9 +2922,23 @@ impl UnitBuilder<'_, '_> {
       Step::String(_, _, rest) => rest.iter().map(|(port, _)| port).collect(),
       Step::BoolNot(a, _) => vec![a],
       Step::BoolAnd(a, b, _) => vec![a, b],
-      _ => return false,
-    };
-    inputs.into_iter().any(|port| self.port_waits(port))
+      _ => vec![],
+    }
+  }
+
+  /// If the value of a wire, produced by the step at `from`, is read by a
+  /// step before the next transfer, which then waits for it, returns the
+  /// index of that step.
+  fn strict_reader(&self, wire: WireId, from: usize) -> Option<usize> {
+    let stage = &self.vir.stages[self.stage];
+    let is_wire = |port: &Port| matches!(port.kind, PortKind::Wire(_, w) if w == wire);
+    let (index, step) = stage
+      .steps
+      .iter()
+      .enumerate()
+      .skip(from + 1)
+      .find(|(_, step)| matches!(step, Step::Transfer(_)) || step.ports().any(is_wire))?;
+    self.strict_inputs(step).into_iter().any(is_wire).then_some(index)
   }
 
   /// Whether the value of a port read by a step is not available yet.
@@ -3524,6 +3574,7 @@ impl UnitBuilder<'_, '_> {
       self.release(reg, len);
     }
     self.in_task.clear();
+    self.reader_tasks.clear();
     for task in take(&mut self.open_tasks) {
       self.finish_task(task);
     }

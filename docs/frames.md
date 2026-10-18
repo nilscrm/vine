@@ -74,9 +74,9 @@ These were decided together with Nils; don't revisit them without asking.
   reader is not known yet are held in holes. Only control flow waits: a branch
   or match on a value that is not available yet, and locals passed to another
   stage (except those produced after the transfer, which are passed in holes).
-  See [Waiting](#waiting). Tasks hold one step each for now; grouping steps
-  which wait for the same values into one frame, and writing values directly
-  into their consumers' slots, are next.
+  See [Waiting](#waiting). Steps which only wait for values one task computes
+  are emitted into that task, and values are written directly into the frames
+  of the tasks reading them where possible.
 - **Limits of dataflow on frames**, where the standard library is adapted
   instead:
   - A frame waits for all of its words, so a match on an enum waits for its
@@ -177,16 +177,28 @@ There are four kinds of values not available yet:
 2. **Held**: the value is held by a hole. Writing it into a space forwards the
    hole; moving it only changes which registers the hole's words belong in. A
    hole whose words are used separately is split by a task (`align_holes`).
-3. **In a task**: a step which reads virtual or held values (an operation,
-   building a string or list, an IO call, ...) is emitted by `emit_detached`
-   into a task: the main code fills the task's frame with the step's inputs
-   (forwarding holes, or pointing virtual spaces into it) and spaces for its
-   outputs, and the step's code runs in the task once they have all arrived.
-   Its outputs are held by holes, or written straight into a known reader
-   (e.g. a callee's frame or the result). Operations write references back
-   before they wait, since they do not change them. Copies of values which are
-   not available yet, writes into spaces which are not, and unboxing a box
-   which is not are tasks too.
+3. **In a task**: a step which reads values which are not available (an
+   operation, building a string or list, an IO call, ...) is emitted by
+   `emit_detached` into a task: the main code fills the task's frame with the
+   step's inputs (forwarding holes, or pointing virtual spaces into it), and
+   the step's code runs in the task once they have all arrived. Tasks stay
+   *open* until the block filling their frames ends (`close_tasks`):
+   - Values a step computes stay in its task (`in_task`). A later step whose
+     waiting inputs are all computed by one open task is emitted into that
+     task (`task_of`), which then waits for nothing more; this groups steps by
+     the values they wait for.
+   - Where a value computed by a task is used elsewhere, the task writes it
+     there: into a callee's frame, another task's frame, or a space
+     (`task_write`); into a hole if it is still used when the task closes
+     (`release`).
+   - A call's result which a later step of the block reads is written
+     directly into the frame of the task that step is emitted into
+     (`reader_tasks`); one which the next transfer waits for arrives in the
+     continuation frame (`awaited_by_transfer`).
+
+   Operations write references back before they wait, since they do not
+   change them. Copies of values which are not available yet, writes into
+   spaces which are not, and unboxing a box which is not are one-off tasks.
 4. **Pending**: control flow which needs a value (a branch condition, the data
    matched on, a closure's environment, locals passed to another stage)
    *suspends*: the values it needs are forwarded into a *continuation frame*,
@@ -202,9 +214,9 @@ returned from child stages which are only passed on are returned in holes too
 
 ## Status
 
-Last updated 2026-10-17 (`tests/frames.sh`, 84 programs):
+Last updated 2026-10-18 (`tests/frames.sh`, 84 programs):
 
-**52 of 84 pass.** Failing programs per error (a program can count more than
+**53 of 84 pass.** Failing programs per error (a program can count more than
 once):
 
 | Programs | Error                                                                   |
@@ -216,7 +228,7 @@ once):
 |        2 | panics in the program (`opaque`: transmute of 0 words into 1; `option_party`) |
 |        1 | invalid operands to `n32:div` (`div_by_zero`; expected output is IVM's) |
 
-The remaining failures have no error: `lcs`, `lambda`, `iterator_party`,
+The remaining failures have no error: `lambda`, `iterator_party`,
 `segmented_sieve` and `nothing_lasts_forever` time out or print wrong output;
 `f32_ops`, `invalid_extrinsics`, `mandelbrot_sixel` and `mandelbrot_tga` print
 wrong output (some snapshots may be IVM-specific). None of these have been
@@ -227,9 +239,15 @@ Notes:
 - Some expected outputs depend on IVM specifics (backtraces of the removed debug
   call stack, IVM's error messages), so a few programs can only pass once their
   snapshots are adapted.
-- Dataflow costs: tasks hold one step each, so programs which passed before
-  run 5–15% more instructions, and 20–50% longer. Grouping steps into tasks by
-  the values they wait for should recover this.
+- Performance: programs which also passed before the dataflow rewrite now run
+  fewer instructions and frames than they did then (e.g. `fib` 88k
+  instructions and 3.4k frames, from 102k and 7.1k; `sieve` 866M, from 1293M).
+  Besides grouping, this comes from discarding values through a null space
+  instead of a frame, skipping calls without inputs or outputs to functions
+  which only move data (e.g. dropping `()`), and inlining constants which are
+  literal words (e.g. `debug::enabled`). The largest remaining costs are calls
+  to small wrappers (e.g. `N32::div`, `Lt::gt`), which are not inlined, and
+  the holes returning values from child stages (`lazy_returns`).
 - Remaining `$ivy` blocks (120 in `root`) are fine when their function is an
   `#[intrinsic]`; others (`F64::fork`, `IO::args`, `IO::File::create`, …) need
   intrinsics.
@@ -255,6 +273,8 @@ Debugging environment variables:
   holes used with the wrong size and writes into objects which are not waiting;
   on a deadlock or leak, list the frames and holes still waiting (holes with
   where they were created).
+- `FRAMES_PROFILE=1`: count how often each block runs and how many frames and
+  holes each instruction creates, and print the top ones.
 - `FRAMES_CHECK=1`: report blocks which read registers that are neither loaded
   from their frame nor written earlier (usually an emitter bug).
 - `FRAMES_DEBUG=1`: add `(stage, step)` to unsupported messages, print stuck
