@@ -35,7 +35,7 @@ run_one() { # kind name vi config
   local build input ext
   build=$(directive "$config" build "")
   input=tests/input/$(directive "$config" input empty)
-  ext=$(directive "$config" ext txt)
+  ext=$(directive "$config" output txt)
   local expected=tests/snaps/$kind/$name/output.$ext
   local out=$OUT/$kind-$name.out.$ext
   # `perl -e alarm` is a portable `timeout`.

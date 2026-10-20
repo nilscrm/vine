@@ -1528,12 +1528,12 @@ impl UnitBuilder<'_, '_> {
   fn call_rel(&mut self, span: Span, rel: FnRelId, args: Vec<CallArg>, ret: Option<(Reg, u32)>) {
     let Ok((callee, _)) = self.e.specs.spec(self.spec_id).rels.fns[rel] else { return };
     match self.e.intrinsic(callee) {
-      Some(Intrinsic::Duplicate) => {
+      Some(Intrinsic::Duplicate | Intrinsic::F64Fork) => {
         let [CallArg::Ref(reg, len)] = args[..] else { unreachable!() };
         let (copy, _) = ret.unwrap();
         self.duplicate(reg, len, copy);
       }
-      Some(Intrinsic::Erase | Intrinsic::Forget) => {
+      Some(Intrinsic::Erase | Intrinsic::Forget | Intrinsic::F64Drop) => {
         // Holes holding the value are still read, to free them.
         if let [CallArg::Regs(reg, len)] = args[..] {
           self.discard_held(reg, len);
