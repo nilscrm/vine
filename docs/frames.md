@@ -210,28 +210,51 @@ they are written, or borrowed by a reference the target takes), or which came
 into the stage in holes, are passed in holes in fixed registers
 (`lazy_inputs`), which all transfers into an interface agree on. Locals
 returned from child stages which are only passed on are returned in holes too
-(`lazy_returns`).
+(`lazy_returns`). If a transfer finds a local not available yet which an
+earlier transfer into the same interface (e.g. a loop's entry) decided to pass
+in its registers, it waits for it, and records the local (`Hints`); the unit is
+then emitted again, passing it in a hole (at most a few times).
+
+**Detached branches**: a branch or match on a value which code after it
+produces (written through a virtual space, or computed by a task waiting for
+such values; see `future`) does not wait. The branch and the chain of stages
+it starts run in a frame of their own (`detach`), entered at the branch, which
+receives the data and the locals the chain uses, and writes the locals it
+returns into holes; control goes on after the chain right away. E.g. in a loop,
+the next iteration starts before the branch of this one is decided, and fills
+it in later. Stages reached from a detached branch are emitted again for it
+(`Mode`), ending by writing the returned locals (`end_detached`) rather than
+returning.
+
+**Inverted locals** (`~x`): their values flow backwards. A read of one becomes
+a space for its next write (`inv_pending`); a write delivers its value to the
+spaces of the reads since the previous write; reads after the last write
+receive the first write, as the scope ends. At stage boundaries, the spaces
+are merged into one, in a fixed register (`inv_spaces`). A branch on such a
+value is detached (above), so loops like `List::trim_back_where` work.
 
 ## Status
 
 Last updated 2026-10-20 (`tests/frames.sh`, 83 programs):
 
-**58 of 83 pass.** Failing programs per error (a program can count more than
+**60 of 83 pass.** Failing programs per error (a program can count more than
 once):
 
 | Programs | Error                                                                   |
 | -------: | ----------------------------------------------------------------------- |
-|        8 | inverted locals (`Nat::div_rem`, `List::trim_back_where`, `inverse`)    |
-|        5 | deadlock (`array_smoothsort`, `sort`, `par`, `regex`, `life`'s streams) |
+|        8 | deadlock (`array_smoothsort`, `sort`, `par`, `regex`; and `Nat` arithmetic: `int_edges`, `nat_div`, `nat_edges`, `f64_roundabout`) |
 |        2 | inline Ivy (`IO::args`, `IO::File::create`)                             |
+|        1 | an inverted local read several times, of a type which is not plain data (`inverse`) |
 |        1 | infinite size (`life`: its streams are written through spaces)          |
-|        1 | transmute of 0 words into 1 (`opaque`: user-declared opaque types)      |
+|        1 | hole read more than once (`f32_roundabout`)                             |
 |        3 | debug mode (`div_by_zero`, `option_party`, `iterator_party`)            |
 
-The remaining failures have no error: `f32_ops`, `f64_ops`, `int_edges` and
-`nat_edges` have no output snapshot; `segmented_sieve` (40s) and
-`mandelbrot_tga` exceed the 20s timeout; `lambda` hits an emitter panic; and
-`nothing_lasts_forever` relies on erasing `io`.
+`Nat` subtraction (`Nat::sub`) uses an inverted local captured by a closure,
+which is not supported yet; most of the `Nat` failures come from it. The
+remaining failures have no error: `f32_ops` and `f64_ops` have no output
+snapshot; `json` prints wrong output; `segmented_sieve`, `lcs` and
+`mandelbrot_tga` take about 20s or more and exceed the timeout; and `lambda`
+hits an emitter panic.
 
 Notes:
 
@@ -250,7 +273,7 @@ Notes:
 - Remaining `$ivy` blocks (120 in `root`) are fine when their function is an
   `#[intrinsic]`; others (`F64::fork`, `IO::args`, `IO::File::create`, …) need
   intrinsics.
-- Inverted locals are not supported.
+- Inverted locals captured by closures are not supported.
 - `cons`, `par`, `regex` and `unary` box their recursive types now; `life`
   writes its recursive streams through spaces, which a `Box` cannot express.
   Tests relying on erasure are marked `TODO(frames)`.
