@@ -42,6 +42,10 @@ pub enum SyntheticItem {
   CompositeDeconstruct(usize),
   CompositeReconstruct(usize),
   Identity,
+  /// The content of a `Box`; an identity, except on frames.
+  Unbox,
+  /// A `Box` of its content; an identity, except on frames.
+  Rebox,
   EnumVariantNames(EnumId),
   EnumDeconstruct(EnumId),
   EnumReconstruct(EnumId),
@@ -121,7 +125,9 @@ impl Synthesizer<'_> {
       SyntheticItem::ConstNil => self_.synthesize_const_nil(),
       SyntheticItem::CompositeDeconstruct(len) => self_.synthesize_composite_deconstruct(len),
       SyntheticItem::CompositeReconstruct(len) => self_.synthesize_composite_reconstruct(len),
-      SyntheticItem::Identity => self_.synthesize_identity(),
+      SyntheticItem::Identity | SyntheticItem::Unbox | SyntheticItem::Rebox => {
+        self_.synthesize_identity()
+      }
       SyntheticItem::EnumVariantNames(enum_id) => self_.synthesize_enum_variant_names(enum_id),
       SyntheticItem::EnumDeconstruct(enum_id) => self_.synthesize_enum_deconstruct(enum_id),
       SyntheticItem::EnumReconstruct(enum_id) => self_.synthesize_enum_reconstruct(enum_id),
@@ -357,11 +363,16 @@ impl Synthesizer<'_> {
 }
 
 impl SyntheticImpl {
-  pub fn fn_(&self, _: &Chart, fn_id: TraitFnId) -> SyntheticItem {
+  pub fn fn_(&self, chart: &Chart, fn_id: TraitFnId) -> SyntheticItem {
     match self {
       SyntheticImpl::Tuple(len) | SyntheticImpl::Object(_, len) => match fn_id {
         TraitFnId(0) => SyntheticItem::CompositeDeconstruct(*len),
         TraitFnId(1) => SyntheticItem::CompositeReconstruct(*len),
+        _ => unreachable!(),
+      },
+      SyntheticImpl::Struct(id) if Some(*id) == chart.builtins.box_ => match fn_id {
+        TraitFnId(0) => SyntheticItem::Unbox,
+        TraitFnId(1) => SyntheticItem::Rebox,
         _ => unreachable!(),
       },
       SyntheticImpl::Struct(_) => match fn_id {
@@ -417,6 +428,8 @@ impl SyntheticItem {
       | SyntheticItem::CompositeDeconstruct(_)
       | SyntheticItem::CompositeReconstruct(_)
       | SyntheticItem::Identity
+      | SyntheticItem::Unbox
+      | SyntheticItem::Rebox
       | SyntheticItem::EnumVariantNames(_)
       | SyntheticItem::EnumDeconstruct(_)
       | SyntheticItem::EnumReconstruct(_)

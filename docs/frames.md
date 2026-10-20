@@ -214,25 +214,24 @@ returned from child stages which are only passed on are returned in holes too
 
 ## Status
 
-Last updated 2026-10-18 (`tests/frames.sh`, 84 programs):
+Last updated 2026-10-20 (`tests/frames.sh`, 83 programs):
 
-**53 of 84 pass.** Failing programs per error (a program can count more than
+**58 of 83 pass.** Failing programs per error (a program can count more than
 once):
 
 | Programs | Error                                                                   |
 | -------: | ----------------------------------------------------------------------- |
-|        7 | inline Ivy (`F64::fork` ×5, `IO::args`, `IO::File::create`)             |
-|        6 | inverted locals (`List::trim_back_where`, `Nat::div_rem`, `inverse`)    |
-|        5 | infinite size (`cons`, `life`, `par`, `regex`, `unary` need a `Box`)    |
-|        2 | deadlock (`array_smoothsort`, `sort`)                                   |
-|        2 | panics in the program (`opaque`: transmute of 0 words into 1; `option_party`) |
-|        1 | invalid operands to `n32:div` (`div_by_zero`; expected output is IVM's) |
+|        8 | inverted locals (`Nat::div_rem`, `List::trim_back_where`, `inverse`)    |
+|        5 | deadlock (`array_smoothsort`, `sort`, `par`, `regex`, `life`'s streams) |
+|        2 | inline Ivy (`IO::args`, `IO::File::create`)                             |
+|        1 | infinite size (`life`: its streams are written through spaces)          |
+|        1 | transmute of 0 words into 1 (`opaque`: user-declared opaque types)      |
+|        3 | debug mode (`div_by_zero`, `option_party`, `iterator_party`)            |
 
-The remaining failures have no error: `lambda`, `iterator_party`,
-`segmented_sieve` and `nothing_lasts_forever` time out or print wrong output;
-`f32_ops`, `invalid_extrinsics`, `mandelbrot_sixel` and `mandelbrot_tga` print
-wrong output (some snapshots may be IVM-specific). None of these have been
-investigated yet.
+The remaining failures have no error: `f32_ops`, `f64_ops`, `int_edges` and
+`nat_edges` have no output snapshot; `segmented_sieve` (40s) and
+`mandelbrot_tga` exceed the 20s timeout; `lambda` hits an emitter panic; and
+`nothing_lasts_forever` relies on erasing `io`.
 
 Notes:
 
@@ -252,8 +251,12 @@ Notes:
   `#[intrinsic]`; others (`F64::fork`, `IO::args`, `IO::File::create`, …) need
   intrinsics.
 - Inverted locals are not supported.
-- `cons`, `life`, `par`, `regex`, `unary` need a `Box` in their recursive types.
+- `cons`, `par`, `regex` and `unary` box their recursive types now; `life`
+  writes its recursive streams through spaces, which a `Box` cannot express.
   Tests relying on erasure are marked `TODO(frames)`.
+- `invalid_extrinsics` was removed: it tested IVM's type checks on extrinsics.
+- A panic (or an invalid operation) only stops the block it occurs in; the
+  runtime runs the other ready work, then reports the first error.
 - Passing programs leak no objects, except `empty_loop` and `log_brute` (as
   before).
 

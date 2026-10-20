@@ -140,6 +140,9 @@ impl<'p, 'h> Runtime<'p, 'h> {
     let result = self.run_ready();
     self.stats.time += start.elapsed();
     self.host.stdout.flush().map_err(|e| RuntimeError::Io(e.to_string()))?;
+    if self.trace && result.is_err() {
+      self.print_waiting();
+    }
     result?;
     if self.trace && self.halted && self.heap.live_objects() != 0 {
       self.print_waiting();
@@ -153,11 +156,22 @@ impl<'p, 'h> Runtime<'p, 'h> {
     Ok(())
   }
 
+  /// Runs frames until none are ready. A panic (or an invalid operation)
+  /// stops only the block it occurs in: the program goes on with the other
+  /// work that is ready, e.g. printing output which comes before the panic,
+  /// and the first such error is returned once nothing is left to run.
   fn run_ready(&mut self) -> Result<(), RuntimeError> {
+    let mut error = None;
     while let Some(frame) = self.ready.pop() {
-      self.run_frame(frame)?;
+      match self.run_frame(frame) {
+        Ok(()) => {}
+        Err(err @ (RuntimeError::Panic(_) | RuntimeError::InvalidOp(_))) => {
+          error.get_or_insert(err);
+        }
+        Err(err) => return Err(err),
+      }
     }
-    Ok(())
+    error.map_or(Ok(()), Err)
   }
 
   fn new_frame(&mut self, block_id: BlockId) -> Addr {

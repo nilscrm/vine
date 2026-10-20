@@ -1175,10 +1175,12 @@ impl UnitBuilder<'_, '_> {
             continue;
           }
           let (reg, len) = self.local_regs(local);
+          // Locals which are only kept until control returns are never
+          // waited for here.
           let waits = (input && self.locals[local] == LocalState::Empty)
             || (self.locals[local] != LocalState::Empty
               && ((0..len).any(|i| self.unwritten.contains_key(&reg.offset(i)))
-                || (self.lazy_locals.contains(&local) && self.local_waits(local))));
+                || ((!input || self.lazy_locals.contains(&local)) && self.local_waits(local))));
           if len != 0 && waits {
             lazy.push((local, self.alloc(1)));
           }
@@ -1734,6 +1736,8 @@ impl UnitBuilder<'_, '_> {
         }
         self.write_value(ret, reg, size);
       }
+      SyntheticItem::Unbox => self.emit_unbox(ret, &args[0]),
+      SyntheticItem::Rebox => self.emit_box(ret, &args[0]),
       SyntheticItem::Identity | SyntheticItem::CompositeDeconstruct(_) => {
         // These only reinterpret a value's words.
         let (reg, len) = self.read_value(&args[0]);
