@@ -13,6 +13,7 @@ use util::{duplicate, erase};
 /// ```
 /// `N32` values are always in the range `[0, 2^32) = [0, 4_294_967_296)`.
 #[builtin = "N32"]
+#[size = 1]
 pub type N32;
 
 pub mod N32 {

@@ -236,6 +236,7 @@ pub mod Show {
   }
 }
 
+#[size = 1]
 type Repl;
 #[builtin = "repl_show"]
 fn repl_show[T; Show[T]](repl: Repl, &value: &T) {

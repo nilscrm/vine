@@ -307,6 +307,10 @@ diags! {
     ["the `#[frameless]` attribute can only be applied to a function"]
   BadIntrinsicAttr
     ["the `#[intrinsic]` attribute can only be applied to a function"]
+  BadSizeAttr
+    ["the `#[size]` attribute can only be applied to an opaque type"]
+  MissingOpaqueSize { ty: String }
+    ["opaque type `{ty}` needs a declared size, e.g. `#[size = 1]`, for the frames backend"]
   FramesUnsupported { what: String }
     ["not yet supported by the frames backend: {what}"]
   NotPlainData { intrinsic: &'static str, ty: String }

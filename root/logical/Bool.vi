@@ -3,6 +3,7 @@ use ops::{Cast, bitwise::{BitAnd, BitOr, BitXor, Not}};
 use util::{duplicate, erase};
 
 #[builtin = "Bool"]
+#[size = 1]
 pub type Bool;
 
 pub mod Bool {

@@ -8,6 +8,7 @@ use util::{duplicate, erase, transmute};
 /// ['V', 'i', 'n', 'e'] as String // "Vine"
 /// ```
 #[builtin = "Char"]
+#[size = 1]
 pub type Char;
 
 pub mod Char {

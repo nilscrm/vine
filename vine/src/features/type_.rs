@@ -70,7 +70,8 @@ impl Charter<'_> {
         ChartedItem::TypeAlias(def, alias_id)
       }
       None => {
-        let opaque_id = self.chart.opaque_types.push(OpaqueTypeDef { span, def, name, generics });
+        let opaque_id =
+          self.chart.opaque_types.push(OpaqueTypeDef { span, def, name, generics, size: None });
         self.define_type(span, def, vis, DefTypeKind::Opaque(opaque_id));
         ChartedItem::OpaqueType(def, opaque_id)
       }

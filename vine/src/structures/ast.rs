@@ -185,6 +185,7 @@ pub enum AttrKind {
   SelfDual,
   Impl(Vec<Path>),
   Intrinsic(String),
+  Size(u32),
 }
 
 pub type GenericParams = Generics<TypeParam, ImplParam>;
