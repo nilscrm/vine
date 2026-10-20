@@ -143,6 +143,9 @@ struct Task {
   /// The register each of the frame's words is loaded into.
   map: Vec<Reg>,
   code: Vec<Instr>,
+  /// Whether it waits for values which code after it produces (see
+  /// `detachable`).
+  future: bool,
 }
 
 impl Task {
@@ -1647,17 +1650,26 @@ impl UnitBuilder<'_, '_> {
     }
     // Values arriving in the continuation frame are waited for: e.g. a call's
     // result which the branch is on.
+    // Only branches on values which code after them produces are detached;
+    // others are waited for.
     let Some((reg, len)) = data else { return false };
-    let regs = (0..len).map(|i| reg.offset(i));
-    if !self.remote(reg, len)
-      || regs.clone().any(|r| self.pending.contains_key(&r))
-      || self.transfer_return(index) == ReturnPoint::Fragment
-    {
+    if !self.future(reg, len) || self.transfer_return(index) == ReturnPoint::Fragment {
       return false;
     }
     let child = index + 1 != self.vir.stages[self.stage].steps.len();
-    let inverted = |local: &Local| self.vir.locals[*local].inv.0;
-    !interface.wires.keys().any(inverted) && (child || !self.owed.iter().any(inverted))
+    // Inverted locals stay with the code emitting the branch.
+    let _ = child;
+    !interface.wires.keys().any(|local| self.vir.locals[*local].inv.0)
+  }
+
+  /// Whether any of the registers' values are produced by code after this
+  /// point: written through a virtual space, or computed by a task waiting
+  /// for such values.
+  fn future(&self, reg: Reg, len: u32) -> bool {
+    (0..len).map(|i| reg.offset(i)).any(|r| {
+      self.unwritten.contains_key(&r)
+        || self.in_task.get(&r).is_some_and(|&(task, _)| self.open_tasks[task].future)
+    })
   }
 
   /// Detaches a branch or match on a value which is not available yet: the
@@ -1677,11 +1689,28 @@ impl UnitBuilder<'_, '_> {
     let interface = &self.vir.interfaces[transfer.interface];
     let child = index + 1 != self.vir.stages[self.stage].steps.len();
     let point = self.transfer_return(index);
-    let owed: Vec<Local> = if child {
+    if env::var("FRAMES_DEBUG").is_ok() {
+      let kinds: Vec<_> = (0..data_len)
+        .map(|i| {
+          let r = data.offset(i);
+          (
+            self.held.contains_key(&r),
+            self.unwritten.contains_key(&r),
+            self.in_task.contains_key(&r),
+          )
+        })
+        .collect();
+      eprintln!(
+        "{}: detaching {:?} at {:?} step {index}, returning to {point:?}; data (held, unwritten, in_task) {kinds:?}",
+        self.fragment.path, transfer.interface, self.stage
+      );
+    }
+    let mut owed: Vec<Local> = if child {
       interface.wires.iter().filter(|(_, w)| w.2).map(|(&local, _)| local).collect()
     } else {
       self.owed.clone()
     };
+    owed.retain(|local| !self.vir.locals[*local].inv.0);
 
     let mut task = self.new_task();
     // The data; a match's goes into the interface's registers.
@@ -3377,7 +3406,7 @@ impl UnitBuilder<'_, '_> {
     let block =
       self.e.program.blocks.push(Block { unit: self.unit, entry: Label(0), frame: vec![] });
     self.code.push(Instr::NewFrame { dst: frame, block });
-    Task { frame, block, map: Vec::new(), code: Vec::new() }
+    Task { frame, block, map: Vec::new(), code: Vec::new(), future: false }
   }
 
   /// Passes a value to a task, returning the registers it is loaded into.
@@ -3511,6 +3540,16 @@ impl UnitBuilder<'_, '_> {
       }
     };
     let frame = self.open_tasks[task].frame;
+    for port in step.ports() {
+      let info = self.port_info(port);
+      if let Some(key) = info.key
+        && !info.writer
+        && let Some(&WireState::Value(reg, len)) = self.wires.get(&key)
+        && self.future(reg, len)
+      {
+        self.open_tasks[task].future = true;
+      }
+    }
     let mut flow = Flow::default();
     let mut outputs = Vec::new();
     for port in step.ports() {
