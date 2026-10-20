@@ -39,7 +39,7 @@
 //! interfaces' wires say which locals are valid where.
 
 use std::{
-  collections::{BTreeMap, HashMap},
+  collections::{BTreeMap, HashMap, HashSet},
   env,
   mem::{swap, take},
 };
@@ -236,6 +236,9 @@ pub(super) fn emit_unit(
     open_tasks: Vec::new(),
     in_task: HashMap::new(),
     reader_tasks: HashMap::new(),
+    inv_spaces: HashMap::new(),
+    inv_pending: HashMap::new(),
+    inv_started: HashSet::new(),
     extra_wires: usize::MAX,
     ret_space: None,
     result: None,
@@ -317,6 +320,13 @@ struct UnitBuilder<'e, 'a> {
   /// Open tasks created for steps which will read values written into them,
   /// by the index of the step.
   reader_tasks: HashMap<usize, usize>,
+  /// For each inverted local, the register holding the space its next value
+  /// is written into, at stage boundaries.
+  inv_spaces: HashMap<Local, Reg>,
+  /// For each inverted local, the spaces its next value is written into.
+  inv_pending: HashMap<Local, Vec<Reg>>,
+  /// The inverted locals whose first segment has ended.
+  inv_started: HashSet<Local>,
   /// The id of the next wire created by the emitter, counting down.
   extra_wires: usize,
 
@@ -344,6 +354,12 @@ impl UnitBuilder<'_, '_> {
   fn emit(&mut self) {
     if !self.compute_returns() {
       return;
+    }
+    for (local, vir_local) in self.vir.locals.iter() {
+      if vir_local.inv.0 {
+        let reg = self.alloc(1);
+        self.inv_spaces.insert(local, reg);
+      }
     }
     // The fragment is entered at its first stage, and at the stages of its
     // closures.
@@ -447,6 +463,15 @@ impl UnitBuilder<'_, '_> {
     }
 
     self.emit_header(stage_id);
+    let root = self.roots().contains(&stage_id);
+    let declared = &self.vir.stages[stage_id].declarations;
+    self.inv_started = self.inv_spaces.keys().filter(|l| !declared.contains(l)).copied().collect();
+    for (&local, &space) in &self.inv_spaces {
+      if root {
+        self.code.push(Instr::Const { dst: space, value: 0 });
+      }
+      self.inv_pending.insert(local, vec![space]);
+    }
 
     // Steps which only move data are emitted once their inputs are available;
     // e.g. destructuring patterns are emitted before the steps producing the
@@ -612,7 +637,10 @@ impl UnitBuilder<'_, '_> {
         let mut moves = Vec::new();
         for local in self.locals.keys().collect::<Vec<_>>() {
           if !self.owed.contains(&local) {
-            self.drop_local(local);
+            // An inverted local's scope only ends where it is declared.
+            if !self.vir.locals[local].inv.0 {
+              self.drop_local(local);
+            }
             continue;
           }
           if self.locals[local] == LocalState::Empty {
@@ -628,6 +656,7 @@ impl UnitBuilder<'_, '_> {
             _ => self.resolve(reg, len),
           }
         }
+        self.merge_inverted();
         self.suspend();
         for (canonical, hole) in moves {
           self.code.push(Instr::Move { dst: canonical, src: hole, len: 1 });
@@ -866,11 +895,138 @@ impl UnitBuilder<'_, '_> {
 
   // Locals
 
+  // Inverted locals
+  //
+  // An inverted local's values flow backwards: a read of it (an invocation
+  // which writes into the local, in VIR) receives the value of its next write
+  // (an invocation which reads from it), and reads after its last write receive
+  // its first write, as the scope ends. Reads are kept as spaces for the next
+  // value (`inv_pending`); at stage boundaries they are merged into one space,
+  // in a fixed register (`inv_spaces`).
+
+  fn emit_inverted_invocation(&mut self, local: Local, invocation: &Invocation) {
+    match invocation {
+      Invocation::Barrier => _ = self.inv_started.insert(local),
+      Invocation::Read(port) | Invocation::ReadBarrier(port) => self.inverted_source(local, port),
+      Invocation::Write(port) => self.inverted_sink(local, port),
+      Invocation::BarrierWrite(port) => {
+        self.inv_started.insert(local);
+        self.inverted_sink(local, port);
+      }
+      Invocation::ReadWrite(source, sink) => {
+        self.inverted_source(local, source);
+        self.inverted_sink(local, sink);
+      }
+    }
+  }
+
+  /// A read of the local's value; it is the value of the next write.
+  fn inverted_sink(&mut self, local: Local, port: &Port) {
+    let info = self.port_info(port);
+    if info.layout.size == 0 {
+      return self.write_value(port, Reg(0), 0);
+    }
+    if !info.writer {
+      return self.unsupported("inverted locals of space types".into());
+    }
+    let space = self.wire_space(port);
+    self.inv_pending.entry(local).or_default().push(space);
+  }
+
+  /// A write of the local's value; reads since the last write receive it.
+  fn inverted_source(&mut self, local: Local, port: &Port) {
+    let info = self.port_info(port);
+    let (value, len) = match info.key {
+      Some(key) if info.layout.size != 0 && !self.wires.contains_key(&key) => {
+        // The value is produced later by this stage.
+        let len = info.layout.size;
+        let value = self.alloc(len);
+        let space = self.pending_space(value, len);
+        self.wire_reader_space(port, space);
+        (value, len)
+      }
+      _ => self.read_value(port),
+    };
+    let pending = take(self.inv_pending.entry(local).or_default());
+    if self.inv_started.insert(local) {
+      // The first write is also the value reads after the last write receive.
+      let (reg, _) = self.local_regs(local);
+      let copy = self.alloc(len);
+      self.duplicate(value, len, copy);
+      self.move_regs(reg, copy, len);
+      self.locals[local] = LocalState::Valid;
+    }
+    self.deliver(local, pending, value, len);
+  }
+
+  /// Writes a value into each of the given spaces.
+  fn deliver(&mut self, local: Local, spaces: Vec<Reg>, value: Reg, len: u32) {
+    match spaces.len() {
+      0 => self.discard_held(value, len),
+      1 => self.emit_write(spaces[0], value, len),
+      n => {
+        if !self.layout(self.vir.locals[local].ty.inverse()).plain {
+          return self.unsupported("an inverted local read several times".into());
+        }
+        for &space in &spaces[1..n] {
+          let copy = self.alloc(len);
+          self.duplicate(value, len, copy);
+          self.emit_write(space, copy, len);
+        }
+        self.emit_write(spaces[0], value, len);
+      }
+    }
+  }
+
+  /// The local's scope ends: reads after its last write receive its first.
+  fn end_inverted(&mut self, local: Local) {
+    let pending = take(self.inv_pending.entry(local).or_default());
+    if self.locals[local] != LocalState::Empty {
+      let (reg, len) = self.local_value(local);
+      self.locals[local] = LocalState::Empty;
+      self.deliver(local, pending, reg, len);
+    } else if !pending.is_empty() {
+      self.inv_pending.insert(local, pending);
+    }
+  }
+
+  /// Merges the spaces each inverted local's next value is written into into
+  /// one, in its fixed register, as the current stage ends.
+  fn merge_inverted(&mut self) {
+    for (local, target) in self.inv_spaces.clone() {
+      let pending = take(self.inv_pending.entry(local).or_default());
+      match pending[..] {
+        [] => self.code.push(Instr::Const { dst: target, value: 0 }),
+        [space] if space == target => {}
+        [space] => {
+          self.materialize(space);
+          self.code.push(Instr::Move { dst: target, src: space, len: 1 });
+        }
+        _ => {
+          // A task copies the value into each of the spaces.
+          let (_, len) = self.local_regs(local);
+          let mut task = self.new_task();
+          let value = self.alloc(len);
+          task.map.extend((0..len).map(|i| value.offset(i)));
+          for space in pending {
+            let space = self.task_input(&mut task, space, 1);
+            task.code.push(Instr::Write { space, src: value, len });
+          }
+          self.code.push(Instr::Space { dst: target, frame: task.frame, offset: 1 });
+          self.finish_task(task);
+        }
+      }
+      self.inv_pending.insert(local, vec![target]);
+    }
+  }
+
   fn local_regs(&mut self, local: Local) -> (Reg, u32) {
     if let Some(&regs) = self.local_regs.get(&local) {
       return regs;
     }
-    let ty = self.vir.locals[local].ty;
+    let vir_local = &self.vir.locals[local];
+    // An inverted local of type `~T` holds the `T` its scope ends with.
+    let ty = if vir_local.inv.0 { vir_local.ty.inverse() } else { vir_local.ty };
     let size = self.layout(ty).size;
     let reg = self.alloc(size);
     self.local_regs.insert(local, (reg, size));
@@ -908,8 +1064,7 @@ impl UnitBuilder<'_, '_> {
 
   fn emit_invocation(&mut self, index: usize, span: Span, local: Local, invocation: &Invocation) {
     if self.vir.locals[local].inv.0 {
-      self.unsupported("inverted locals".into());
-      return;
+      return self.emit_inverted_invocation(local, invocation);
     }
     match invocation {
       Invocation::Barrier => self.drop_local(local),
@@ -1025,6 +1180,9 @@ impl UnitBuilder<'_, '_> {
 
   /// Drops the local's value, if it has one.
   fn drop_local(&mut self, local: Local) {
+    if self.vir.locals[local].inv.0 {
+      return self.end_inverted(local);
+    }
     match self.locals[local] {
       LocalState::Empty => {}
       // The value is owned by the other local.
@@ -1138,6 +1296,7 @@ impl UnitBuilder<'_, '_> {
         if input
           && !barrier
           && !output
+          && !self.vir.locals[local].inv.0
           && self.locals[local] != LocalState::Empty
           && self.used_later(index, local)
         {
@@ -1235,6 +1394,7 @@ impl UnitBuilder<'_, '_> {
         }
       }
     }
+    self.merge_inverted();
     // The copies are preserved if this waits.
     self.temps.extend(kept.iter().map(|&(_, copy, len)| (copy, len)));
     if let Some((reg, len)) = data {
@@ -1320,6 +1480,9 @@ impl UnitBuilder<'_, '_> {
     if child {
       let point = ReturnPoint::After(self.stage, index);
       self.return_labels.insert(point, self.label());
+      for (&local, &space) in &self.inv_spaces {
+        self.inv_pending.insert(local, vec![space]);
+      }
       for (&local, &(input, _, output)) in &interface.wires {
         if output {
           self.locals[local] = LocalState::Valid;
@@ -3557,6 +3720,9 @@ impl UnitBuilder<'_, '_> {
   /// The registers holding values which are still used.
   fn live(&mut self) -> Vec<(Reg, u32)> {
     let mut live = self.outer.clone();
+    for pending in self.inv_pending.values() {
+      live.extend(pending.iter().map(|&space| (space, 1)));
+    }
     live.extend(self.temps.iter().copied());
     live.extend(self.live_wires());
     live.extend(self.ret_space.map(|r| (r, 1)));
