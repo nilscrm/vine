@@ -39,7 +39,7 @@
 //! interfaces' wires say which locals are valid where.
 
 use std::{
-  collections::{BTreeMap, HashMap, HashSet},
+  collections::{BTreeMap, BTreeSet, HashMap, HashSet},
   env,
   mem::{swap, take},
 };
@@ -115,6 +115,8 @@ struct Context {
   /// the step after the transfer which started it: the outputs of that
   /// transfer's interface.
   owed: Vec<Local>,
+  mode: Mode,
+  detach_spaces: Vec<(Local, Reg)>,
 }
 
 impl Context {
@@ -126,6 +128,8 @@ impl Context {
       ret_space: None,
       result: None,
       owed: Vec::new(),
+      mode: None,
+      detach_spaces: Vec::new(),
     }
   }
 }
@@ -181,12 +185,26 @@ struct PortInfo {
 }
 
 enum Fixup {
-  Stage(StageId),
-  Return(ReturnPoint),
+  Stage(StageId, Mode),
+  Return(ReturnPoint, Mode),
+}
+
+/// Stages are emitted once for each mode they are reached in: normally
+/// (`None`), or as part of a chain of stages detached into a frame of its own,
+/// which ends at the given return point instead of returning there (see
+/// `detach`).
+type Mode = Option<ReturnPoint>;
+
+/// Locals which re-emitting a unit should pass in holes, as some transfers
+/// found them not available yet.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct Hints {
+  inputs: BTreeMap<InterfaceId, BTreeSet<Local>>,
+  returns: BTreeMap<ReturnPoint, BTreeSet<Local>>,
 }
 
 /// Where control goes once a stage finishes without a final transfer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ReturnPoint {
   /// The fragment returns.
   Fragment,
@@ -206,6 +224,44 @@ pub(super) fn emit_unit(
   let vir = &e.vir[fragment_id];
   let unit = e.program.units.push(Unit { name: fragment.path.clone(), regs: 0, code: vec![] });
   let Ok(params) = e.type_param_terms(spec_id, fragment.generics) else { return (unit, vec![]) };
+  // A unit is emitted again if some transfers found locals not available yet
+  // which they could not pass in holes, as earlier transfers into the same
+  // interface decided otherwise; at most a few times.
+  let mut hints = Hints::default();
+  let mut attempt = 0;
+  loop {
+    let first_block = e.program.blocks.len();
+    let (code, next_reg, entries, wanted) =
+      emit_unit_with(e, spec_id, fragment, vir, params.clone(), unit, hints.clone());
+    attempt += 1;
+    if wanted == hints || attempt == 4 {
+      if env::var("FRAMES_DEBUG").is_ok() {
+        let stages = entries.iter().map(|e| e.0).collect::<Vec<_>>();
+        eprintln!("{}: entries {stages:?}", fragment.path);
+      }
+      e.program.units[unit] = Unit { name: fragment.path.clone(), regs: next_reg, code };
+      return (unit, entries);
+    }
+    // The blocks created by this attempt are not used.
+    for block in first_block..e.program.blocks.len() {
+      let block = BlockId(block);
+      if e.program.blocks[block].unit == unit {
+        e.program.blocks[block] = e.dead_block_value();
+      }
+    }
+    hints = wanted;
+  }
+}
+
+fn emit_unit_with<'a>(
+  e: &mut FramesEmitter<'a>,
+  spec_id: SpecId,
+  fragment: &'a Fragment,
+  vir: &'a Vir,
+  params: Vec<Term>,
+  unit: UnitId,
+  hints: Hints,
+) -> (Vec<Instr>, u32, Vec<(StageId, Label, Vec<Reg>)>, Hints) {
   let mut builder = UnitBuilder {
     e,
     spec_id,
@@ -251,15 +307,15 @@ pub(super) fn emit_unit(
     interface_data: HashMap::new(),
     queue: Vec::new(),
     entries: Vec::new(),
+    mode: None,
+    detach_spaces: Vec::new(),
+    detach_regs: HashMap::new(),
+    wanted: hints.clone(),
+    hints,
   };
   builder.emit();
-  let UnitBuilder { code, next_reg, entries, .. } = builder;
-  if env::var("FRAMES_DEBUG").is_ok() {
-    let stages = entries.iter().map(|e| e.0).collect::<Vec<_>>();
-    eprintln!("{}: entries {stages:?}", fragment.path);
-  }
-  e.program.units[unit] = Unit { name: fragment.path.clone(), regs: next_reg, code };
-  (unit, entries)
+  let UnitBuilder { code, next_reg, entries, wanted, .. } = builder;
+  (code, next_reg, entries, wanted)
 }
 
 struct UnitBuilder<'e, 'a> {
@@ -300,7 +356,7 @@ struct UnitBuilder<'e, 'a> {
   /// For each point a child stage returns to, the locals it returns which are
   /// only passed on there, and the registers of the holes returning them; the
   /// code after the return point is shared by every path returning to it.
-  lazy_returns: HashMap<ReturnPoint, Vec<(Local, Reg)>>,
+  lazy_returns: HashMap<(ReturnPoint, Mode), Vec<(Local, Reg)>>,
   /// For each interface, the locals passed to it in holes, and the registers
   /// of the holes; all transfers into an interface agree on these.
   lazy_inputs: HashMap<InterfaceId, Vec<(Local, Reg)>>,
@@ -337,17 +393,28 @@ struct UnitBuilder<'e, 'a> {
   /// Spaces to write locals' final values into when the current scope ends.
   at_end: Vec<(Local, AtEnd)>,
 
-  stage_labels: HashMap<StageId, Label>,
+  stage_labels: HashMap<(StageId, Mode), Label>,
   fixups: Vec<(usize, usize, Fixup)>,
   /// Where each stage returns to.
   returns: HashMap<StageId, ReturnPoint>,
-  return_labels: HashMap<ReturnPoint, Label>,
+  return_labels: HashMap<(ReturnPoint, Mode), Label>,
   /// The registers holding the data passed through an interface (e.g. the
   /// value matched on).
   interface_data: HashMap<InterfaceId, (Reg, u32)>,
   /// Stages to emit, with the state they are entered with.
   queue: Vec<(StageId, Context)>,
   entries: Vec<(StageId, Label, Vec<Reg>)>,
+  /// The mode the current stage is emitted in.
+  mode: Mode,
+  /// In a detached chain of stages, the registers holding the spaces the
+  /// locals it returns are written into.
+  detach_spaces: Vec<(Local, Reg)>,
+  /// The registers holding those spaces, by return point and local.
+  detach_regs: HashMap<(ReturnPoint, Local), Reg>,
+  /// The locals to pass in holes, as found by an earlier emission.
+  hints: Hints,
+  /// The locals to pass in holes, as found by this emission.
+  wanted: Hints,
 }
 
 impl UnitBuilder<'_, '_> {
@@ -367,14 +434,14 @@ impl UnitBuilder<'_, '_> {
       self.queue.push((stage, Context::new(self.vir.locals.len())));
     }
     while let Some((stage, context)) = self.queue.pop() {
-      if !self.stage_labels.contains_key(&stage) {
+      if !self.stage_labels.contains_key(&(stage, context.mode)) {
         self.emit_stage(stage, &context);
       }
     }
     for (index, target, fixup) in take(&mut self.fixups) {
       let label = match fixup {
-        Fixup::Stage(stage) => self.stage_labels[&stage],
-        Fixup::Return(point) => self.return_labels[&point],
+        Fixup::Stage(stage, mode) => self.stage_labels[&(stage, mode)],
+        Fixup::Return(point, mode) => self.return_labels[&(point, mode)],
       };
       set_target(&mut self.code[index], target, label);
     }
@@ -433,7 +500,11 @@ impl UnitBuilder<'_, '_> {
     let stage = &self.vir.stages[stage_id];
     self.stage = stage_id;
     self.stage_ended = false;
-    self.stage_labels.insert(stage_id, self.label());
+    self.stage_labels.insert((stage_id, context.mode), self.label());
+    // The stage may have been emitted in another mode before.
+    self.wires.retain(|key, _| key.0 != stage_id);
+    self.mode = context.mode;
+    self.detach_spaces = context.detach_spaces.clone();
     self.outer = context.outer.clone();
     self.locals = context.locals.clone();
     self.at_end = context.at_end.clone();
@@ -466,11 +537,14 @@ impl UnitBuilder<'_, '_> {
     let root = self.roots().contains(&stage_id);
     let declared = &self.vir.stages[stage_id].declarations;
     self.inv_started = self.inv_spaces.keys().filter(|l| !declared.contains(l)).copied().collect();
-    for (&local, &space) in &self.inv_spaces {
-      if root {
-        self.code.push(Instr::Const { dst: space, value: 0 });
+    self.inv_pending.clear();
+    if self.mode.is_none() {
+      for (&local, &space) in &self.inv_spaces {
+        if root {
+          self.code.push(Instr::Const { dst: space, value: 0 });
+        }
+        self.inv_pending.insert(local, vec![space]);
       }
-      self.inv_pending.insert(local, vec![space]);
     }
 
     // Steps which only move data are emitted once their inputs are available;
@@ -633,7 +707,10 @@ impl UnitBuilder<'_, '_> {
       }
       point @ ReturnPoint::After(..) => {
         self.emit_at_end();
-        let lazy = self.lazy_returns.get(&point).cloned().unwrap_or_default();
+        if self.mode == Some(point) {
+          return self.end_detached();
+        }
+        let lazy = self.lazy_returns.get(&(point, self.mode)).cloned().unwrap_or_default();
         let mut moves = Vec::new();
         for local in self.locals.keys().collect::<Vec<_>>() {
           if !self.owed.contains(&local) {
@@ -653,7 +730,12 @@ impl UnitBuilder<'_, '_> {
               self.temps.push((hole, 1));
               moves.push((canonical, hole));
             }
-            _ => self.resolve(reg, len),
+            _ => {
+              if self.remote(reg, len) {
+                self.wanted.returns.entry(point).or_default().insert(local);
+              }
+              self.resolve(reg, len)
+            }
           }
         }
         self.merge_inverted();
@@ -661,7 +743,7 @@ impl UnitBuilder<'_, '_> {
         for (canonical, hole) in moves {
           self.code.push(Instr::Move { dst: canonical, src: hole, len: 1 });
         }
-        self.fixups.push((self.code.len(), 0, Fixup::Return(point)));
+        self.fixups.push((self.code.len(), 0, Fixup::Return(point, self.mode)));
         self.code.push(Instr::Jump { target: Label(0) });
       }
     }
@@ -929,7 +1011,12 @@ impl UnitBuilder<'_, '_> {
     if !info.writer {
       return self.unsupported("inverted locals of space types".into());
     }
-    let space = self.wire_space(port);
+    // The value comes from later code, so it is not waited for where it is
+    // used (as `wire_space` might arrange).
+    let len = info.layout.size;
+    let value = self.alloc(len);
+    let space = self.pending_space(value, len);
+    self.write_value(port, value, len);
     self.inv_pending.entry(local).or_default().push(space);
   }
 
@@ -993,6 +1080,9 @@ impl UnitBuilder<'_, '_> {
   /// Merges the spaces each inverted local's next value is written into into
   /// one, in its fixed register, as the current stage ends.
   fn merge_inverted(&mut self) {
+    if self.mode.is_some() {
+      return;
+    }
     for (local, target) in self.inv_spaces.clone() {
       let pending = take(self.inv_pending.entry(local).or_default());
       match pending[..] {
@@ -1336,9 +1426,12 @@ impl UnitBuilder<'_, '_> {
           let (reg, len) = self.local_regs(local);
           // Locals which are only kept until control returns are never
           // waited for here.
+          let hinted =
+            self.hints.inputs.get(&transfer.interface).is_some_and(|h| h.contains(&local));
           let waits = (input && self.locals[local] == LocalState::Empty)
             || (self.locals[local] != LocalState::Empty
-              && ((0..len).any(|i| self.unwritten.contains_key(&reg.offset(i)))
+              && (hinted
+                || (0..len).any(|i| self.unwritten.contains_key(&reg.offset(i)))
                 || ((!input || self.lazy_locals.contains(&local)) && self.local_waits(local))));
           if len != 0 && waits {
             lazy.push((local, self.alloc(1)));
@@ -1373,11 +1466,17 @@ impl UnitBuilder<'_, '_> {
       self.temps.push((canonical, 1));
     }
 
+    if self.detachable(index, transfer, data) {
+      return self.detach(index, transfer, data.unwrap(), kept, &lazy);
+    }
+
     // Pass the locals the target needs; they are kept in their registers.
     // Holds and virtual spaces only exist while the current stage is emitted,
-    // so they are resolved and made real.
+    // so they are resolved and made real. A later emission passes those which
+    // are not available yet in holes.
     for (&local, &(input, _, _)) in &interface.wires {
       if input && self.locals[local] != LocalState::Empty {
+        self.note_waited_input(transfer.interface, local);
         let (reg, len) = self.local_value(local);
         self.materialize_range(reg, len);
         self.resolve(reg, len);
@@ -1388,6 +1487,7 @@ impl UnitBuilder<'_, '_> {
         if !keep(local) {
           self.drop_local(local);
         } else if self.locals[local] != LocalState::Empty {
+          self.note_waited_input(transfer.interface, local);
           let (reg, len) = self.local_value(local);
           self.materialize_range(reg, len);
           self.resolve(reg, len);
@@ -1427,6 +1527,8 @@ impl UnitBuilder<'_, '_> {
         ret_space: self.ret_space,
         result: self.result.clone(),
         owed: interface.wires.iter().filter(|(_, w)| w.2).map(|(&local, _)| local).collect(),
+        mode: self.mode,
+        detach_spaces: Vec::new(),
       }
     } else {
       Context {
@@ -1436,6 +1538,8 @@ impl UnitBuilder<'_, '_> {
         ret_space: self.ret_space,
         result: self.result.clone(),
         owed,
+        mode: self.mode,
+        detach_spaces: self.detach_spaces.clone(),
       }
     };
     // A branch on a constant only emits the stage taken; the other may not be
@@ -1457,8 +1561,8 @@ impl UnitBuilder<'_, '_> {
       InterfaceKind::Branch(..) if constant.is_some() => self.jump(constant.unwrap()),
       InterfaceKind::Branch(then, else_) => {
         let (cond, _) = data.unwrap();
-        self.fixups.push((self.code.len(), 0, Fixup::Stage(*then)));
-        self.fixups.push((self.code.len(), 1, Fixup::Stage(*else_)));
+        self.fixups.push((self.code.len(), 0, Fixup::Stage(*then, self.mode)));
+        self.fixups.push((self.code.len(), 1, Fixup::Stage(*else_, self.mode)));
         self.code.push(Instr::Branch { cond, then: Label(0), else_: Label(0) });
       }
       InterfaceKind::Match(_, stages) => {
@@ -1470,7 +1574,7 @@ impl UnitBuilder<'_, '_> {
         });
         self.move_regs(canonical.0, reg, len);
         for (i, &stage) in stages.iter().enumerate() {
-          self.fixups.push((self.code.len(), i, Fixup::Stage(stage)));
+          self.fixups.push((self.code.len(), i, Fixup::Stage(stage, self.mode)));
         }
         self.code.push(Instr::Switch { tag: canonical.0, targets: vec![Label(0); stages.len()] });
       }
@@ -1479,7 +1583,7 @@ impl UnitBuilder<'_, '_> {
 
     if child {
       let point = ReturnPoint::After(self.stage, index);
-      self.return_labels.insert(point, self.label());
+      self.return_labels.insert((point, self.mode), self.label());
       for (&local, &space) in &self.inv_spaces {
         self.inv_pending.insert(local, vec![space]);
       }
@@ -1492,8 +1596,9 @@ impl UnitBuilder<'_, '_> {
       }
       // Returned locals which are only passed on are returned in holes.
       let mut lazy = Vec::new();
+      let hinted = self.hints.returns.get(&point).cloned().unwrap_or_default();
       for (&local, &(_, _, output)) in &interface.wires {
-        if output && self.local_passed_on(index, local) {
+        if output && (self.local_passed_on(index, local) || hinted.contains(&local)) {
           let (reg, len) = self.local_regs(local);
           if len != 0 {
             let hole = self.alloc(1);
@@ -1502,7 +1607,7 @@ impl UnitBuilder<'_, '_> {
           }
         }
       }
-      self.lazy_returns.insert(point, lazy);
+      self.lazy_returns.insert((point, self.mode), lazy);
       for (local, copy, len) in kept {
         let (reg, _) = self.local_regs(local);
         self.move_regs(reg, copy, len);
@@ -1511,6 +1616,253 @@ impl UnitBuilder<'_, '_> {
     } else {
       self.stage_ended = true;
     }
+  }
+
+  /// Records that a local passed to an interface was waited for, if it was not
+  /// available, so that a later emission passes it in a hole.
+  fn note_waited_input(&mut self, interface: InterfaceId, local: Local) {
+    if self.local_waits(local) {
+      self.wanted.inputs.entry(interface).or_default().insert(local);
+    }
+  }
+
+  /// The point a transfer's chain of stages returns to.
+  fn transfer_return(&self, index: usize) -> ReturnPoint {
+    if index + 1 != self.vir.stages[self.stage].steps.len() {
+      ReturnPoint::After(self.stage, index)
+    } else {
+      self.returns[&self.stage]
+    }
+  }
+
+  /// Whether a branch or match is detached (see `detach`): its data is not
+  /// available yet, control returns after it, and it involves no inverted
+  /// locals.
+  fn detachable(&mut self, index: usize, transfer: &Transfer, data: Option<(Reg, u32)>) -> bool {
+    let interface = &self.vir.interfaces[transfer.interface];
+    if !matches!(interface.kind, InterfaceKind::Branch(..) | InterfaceKind::Match(..))
+      || self.constant_condition(transfer).is_some()
+    {
+      return false;
+    }
+    // Values arriving in the continuation frame are waited for: e.g. a call's
+    // result which the branch is on.
+    let Some((reg, len)) = data else { return false };
+    let regs = (0..len).map(|i| reg.offset(i));
+    if !self.remote(reg, len)
+      || regs.clone().any(|r| self.pending.contains_key(&r))
+      || self.transfer_return(index) == ReturnPoint::Fragment
+    {
+      return false;
+    }
+    let child = index + 1 != self.vir.stages[self.stage].steps.len();
+    let inverted = |local: &Local| self.vir.locals[*local].inv.0;
+    !interface.wires.keys().any(inverted) && (child || !self.owed.iter().any(inverted))
+  }
+
+  /// Detaches a branch or match on a value which is not available yet: the
+  /// branch and the chain of stages it starts are run by a frame of their own,
+  /// which receives the data and the locals they use, and writes the locals
+  /// they return into holes. Control goes on after the chain right away; e.g.
+  /// the next iteration of a loop starts before the branch of this one is
+  /// decided.
+  fn detach(
+    &mut self,
+    index: usize,
+    transfer: &Transfer,
+    (data, data_len): (Reg, u32),
+    kept: Vec<(Local, Reg, u32)>,
+    lazy: &[(Local, Reg)],
+  ) {
+    let interface = &self.vir.interfaces[transfer.interface];
+    let child = index + 1 != self.vir.stages[self.stage].steps.len();
+    let point = self.transfer_return(index);
+    let owed: Vec<Local> = if child {
+      interface.wires.iter().filter(|(_, w)| w.2).map(|(&local, _)| local).collect()
+    } else {
+      self.owed.clone()
+    };
+
+    let mut task = self.new_task();
+    // The data; a match's goes into the interface's registers.
+    let data_reg = match interface.kind {
+      InterfaceKind::Match(..) => {
+        let canonical = *self.interface_data.entry(transfer.interface).or_insert_with(|| {
+          let reg = Reg(self.next_reg);
+          self.next_reg += data_len;
+          (reg, data_len)
+        });
+        canonical.0
+      }
+      _ => self.alloc(data_len),
+    };
+    let offset = task.offset();
+    self.emit_fill(task.frame, offset, data, data_len);
+    task.map.extend((0..data_len).map(|i| data_reg.offset(i)));
+    // The locals the chain uses, in their registers; holes for those passed
+    // in holes.
+    for &(_, canonical) in lazy {
+      let offset = task.offset();
+      self.emit_fill(task.frame, offset, canonical, 1);
+      task.map.push(canonical);
+    }
+    let mut inputs: Vec<Local> = interface
+      .wires
+      .iter()
+      .filter(|(local, w)| w.0 && !lazy.iter().any(|(l, _)| l == *local))
+      .map(|(&local, _)| local)
+      .collect();
+    if !child {
+      inputs.extend(owed.iter().copied().filter(|l| !interface.wires.contains_key(l)));
+    }
+    for local in inputs {
+      if self.locals[local] == LocalState::Empty {
+        continue;
+      }
+      let (reg, len) = self.local_value(local);
+      let offset = task.offset();
+      self.emit_fill(task.frame, offset, reg, len);
+      task.map.extend((0..len).map(|i| reg.offset(i)));
+      self.locals[local] = LocalState::Empty;
+    }
+    let mut at_end = Vec::new();
+    if !child {
+      at_end = take(&mut self.at_end);
+      for &(_, action) in &at_end {
+        let offset = task.offset();
+        self.emit_fill(task.frame, offset, action.reg(), 1);
+        task.map.push(action.reg());
+      }
+    }
+    // Spaces for the locals the chain returns; within a detached chain
+    // returning to the same point, the spaces it already has.
+    let mut spaces = Vec::new();
+    for &local in &owed {
+      let (reg, len) = self.local_regs(local);
+      if len == 0 || self.vir.locals[local].inv.0 {
+        continue;
+      }
+      let space = match self.detach_spaces.iter().find(|&&(l, _)| l == local) {
+        Some(&(_, space)) if self.mode == Some(point) => space,
+        _ => {
+          let hole = self.alloc(1);
+          self.code.push(Instr::HoleNew { dst: hole, len });
+          let space = self.alloc(1);
+          self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
+          self.hold_regs(hole, (0..len).map(|i| reg.offset(i)).collect());
+          self.locals[local] = LocalState::Valid;
+          space
+        }
+      };
+      let target = *self.detach_regs.entry((point, local)).or_insert_with(|| {
+        let reg = Reg(self.next_reg);
+        self.next_reg += 1;
+        reg
+      });
+      let offset = task.offset();
+      self.emit_fill(task.frame, offset, space, 1);
+      task.map.push(target);
+      spaces.push((local, target));
+    }
+
+    // The frame enters the unit at the branch, emitted here but skipped.
+    let skip = self.code.len();
+    self.code.push(Instr::Jump { target: Label(0) });
+    let entry = self.label();
+    match &interface.kind {
+      InterfaceKind::Branch(then, else_) => {
+        self.fixups.push((self.code.len(), 0, Fixup::Stage(*then, Some(point))));
+        self.fixups.push((self.code.len(), 1, Fixup::Stage(*else_, Some(point))));
+        self.code.push(Instr::Branch { cond: data_reg, then: Label(0), else_: Label(0) });
+      }
+      InterfaceKind::Match(_, stages) => {
+        for (i, &stage) in stages.iter().enumerate() {
+          self.fixups.push((self.code.len(), i, Fixup::Stage(stage, Some(point))));
+        }
+        self.code.push(Instr::Switch { tag: data_reg, targets: vec![Label(0); stages.len()] });
+      }
+      _ => unreachable!(),
+    }
+    let after = self.label();
+    set_target(&mut self.code[skip], 0, after);
+    self.e.program.blocks[task.block] = Block { unit: self.unit, entry, frame: task.map };
+
+    let locals = if child {
+      let mut locals = IdxVec::from_iter(self.locals.keys().map(|_| LocalState::Empty));
+      for (&local, &(input, _, _)) in &interface.wires {
+        if input {
+          locals[local] = LocalState::Valid;
+        }
+      }
+      locals
+    } else {
+      let mut locals = self.locals.clone();
+      for &local in &owed {
+        locals[local] = LocalState::Valid;
+      }
+      locals
+    };
+    let context = Context {
+      outer: Vec::new(),
+      locals,
+      at_end,
+      ret_space: None,
+      result: None,
+      owed,
+      mode: Some(point),
+      detach_spaces: spaces,
+    };
+    for target in interface.kind.stages() {
+      self.queue.push((target, context.clone()));
+    }
+
+    if self.mode == Some(point) {
+      // The rest of this detached chain is run by the new frame.
+      self.suspend();
+      self.code.push(Instr::End);
+      self.stage_ended = true;
+    } else if child {
+      // Control goes on after the chain, with the locals it returns held.
+      for (&local, &(input, _, output)) in &interface.wires {
+        if input && !output {
+          self.locals[local] = LocalState::Empty;
+        }
+      }
+      for (local, copy, len) in kept {
+        let (reg, _) = self.local_regs(local);
+        self.move_regs(reg, copy, len);
+        self.locals[local] = LocalState::Valid;
+      }
+    } else {
+      // Control returns to where the chain returns to.
+      self.end_stage();
+    }
+  }
+
+  /// Ends a detached chain of stages: the locals it returns are written into
+  /// the spaces it received for them.
+  fn end_detached(&mut self) {
+    self.emit_at_end();
+    for local in self.locals.keys().collect::<Vec<_>>() {
+      if !self.owed.contains(&local) {
+        if !self.vir.locals[local].inv.0 {
+          self.drop_local(local);
+        }
+        continue;
+      }
+      let Some(&(_, space)) = self.detach_spaces.iter().find(|&&(l, _)| l == local) else {
+        continue;
+      };
+      if self.locals[local] == LocalState::Empty {
+        continue;
+      }
+      let (reg, len) = self.local_value(local);
+      self.locals[local] = LocalState::Empty;
+      self.emit_write(space, reg, len);
+    }
+    self.suspend();
+    self.code.push(Instr::End);
+    self.stage_ended = true;
   }
 
   /// The value of a branch's condition, if it is a constant boolean.
@@ -1553,7 +1905,7 @@ impl UnitBuilder<'_, '_> {
   }
 
   fn jump(&mut self, stage: StageId) {
-    self.fixups.push((self.code.len(), 0, Fixup::Stage(stage)));
+    self.fixups.push((self.code.len(), 0, Fixup::Stage(stage, self.mode)));
     self.code.push(Instr::Jump { target: Label(0) });
   }
 

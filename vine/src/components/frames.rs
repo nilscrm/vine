@@ -47,6 +47,8 @@ pub struct FramesEmitter<'a> {
   queued: HashSet<SpecId>,
   /// Blocks whose frames write a value of a given size into a space.
   write: HashMap<u32, BlockId>,
+  /// The unit of blocks which are not used.
+  dead_unit: Option<UnitId>,
 }
 
 impl<'a> FramesEmitter<'a> {
@@ -87,6 +89,7 @@ impl<'a> FramesEmitter<'a> {
       queue: Vec::new(),
       queued: HashSet::new(),
       write: HashMap::new(),
+      dead_unit: None,
     }
   }
 
@@ -170,6 +173,21 @@ impl<'a> FramesEmitter<'a> {
         self.error(Diag::FramesUnsupported { span: Span::NONE, what: format!("{item:?}") });
       }
     }
+  }
+
+  /// A block which does nothing, for blocks of an emission of a unit which is
+  /// not used.
+  pub(crate) fn dead_block_value(&mut self) -> Block {
+    let unit = match self.dead_unit {
+      Some(unit) => unit,
+      None => {
+        let unit =
+          self.program.units.push(Unit { name: "dead".into(), regs: 0, code: vec![Instr::End] });
+        self.dead_unit = Some(unit);
+        unit
+      }
+    };
+    Block { unit, entry: Label(0), frame: vec![] }
   }
 
   /// Returns a block whose frames receive a space, and a value of `len`
