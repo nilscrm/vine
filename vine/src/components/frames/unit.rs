@@ -117,6 +117,7 @@ struct Context {
   owed: Vec<Local>,
   mode: Mode,
   detach_spaces: Vec<(Local, Reg)>,
+  inv_out: Vec<(Local, Reg)>,
 }
 
 impl Context {
@@ -130,6 +131,7 @@ impl Context {
       owed: Vec::new(),
       mode: None,
       detach_spaces: Vec::new(),
+      inv_out: Vec::new(),
     }
   }
 }
@@ -298,6 +300,7 @@ fn emit_unit_with<'a>(
     inv_spaces: HashMap::new(),
     inv_pending: HashMap::new(),
     inv_started: HashSet::new(),
+    inv_out: Vec::new(),
     extra_wires: usize::MAX,
     ret_space: None,
     result: None,
@@ -386,6 +389,9 @@ struct UnitBuilder<'e, 'a> {
   inv_pending: HashMap<Local, Vec<Reg>>,
   /// The inverted locals whose first segment has ended.
   inv_started: HashSet<Local>,
+  /// In a closure, the spaces for the spaces of the reads of captured inverted
+  /// locals after its last writes, written as the closure returns.
+  inv_out: Vec<(Local, Reg)>,
   /// The id of the next wire created by the emitter, counting down.
   extra_wires: usize,
 
@@ -508,6 +514,7 @@ impl UnitBuilder<'_, '_> {
     self.wires.retain(|key, _| key.0 != stage_id);
     self.mode = context.mode;
     self.detach_spaces = context.detach_spaces.clone();
+    self.inv_out = context.inv_out.clone();
     self.outer = context.outer.clone();
     self.locals = context.locals.clone();
     self.at_end = context.at_end.clone();
@@ -526,7 +533,11 @@ impl UnitBuilder<'_, '_> {
 
     let interface = &self.vir.interfaces[stage.interface];
     for (&local, &(input, _, _)) in &interface.wires {
-      self.locals[local] = if input { LocalState::Valid } else { LocalState::Empty };
+      // An inverted local only has a value (its first write) where it is in
+      // scope; that is not what its wires describe.
+      if !self.vir.locals[local].inv.0 {
+        self.locals[local] = if input { LocalState::Valid } else { LocalState::Empty };
+      }
     }
     self.lazy_locals.clear();
     for (local, hole) in self.lazy_inputs.get(&stage.interface).cloned().unwrap_or_default() {
@@ -536,11 +547,11 @@ impl UnitBuilder<'_, '_> {
       self.lazy_locals.push(local);
     }
 
-    self.emit_header(stage_id);
     let root = self.roots().contains(&stage_id);
     let declared = &self.vir.stages[stage_id].declarations;
     self.inv_started = self.inv_spaces.keys().filter(|l| !declared.contains(l)).copied().collect();
     self.inv_pending.clear();
+    let start = self.label();
     if self.mode.is_none() {
       for (&local, &space) in &self.inv_spaces {
         if root {
@@ -548,6 +559,11 @@ impl UnitBuilder<'_, '_> {
         }
         self.inv_pending.insert(local, vec![space]);
       }
+    }
+    self.emit_header(stage_id);
+    // The stage is entered before the spaces are initialized.
+    if root && let Some(entry) = self.entries.iter_mut().find(|entry| entry.0 == stage_id) {
+      entry.1 = start;
     }
 
     // Steps which only move data are emitted once their inputs are available;
@@ -705,6 +721,10 @@ impl UnitBuilder<'_, '_> {
         for local in self.locals.keys().collect::<Vec<_>>() {
           self.drop_local(local);
         }
+        for (local, out) in take(&mut self.inv_out) {
+          let space = self.merged_inverted_space(local);
+          self.emit_write(out, space, 1);
+        }
         self.suspend();
         self.code.push(Instr::End);
       }
@@ -734,7 +754,7 @@ impl UnitBuilder<'_, '_> {
               moves.push((canonical, hole));
             }
             _ => {
-              if self.remote(reg, len) {
+              if self.remote(reg, len) && !self.vir.locals[local].inv.0 {
                 self.wanted.returns.entry(point).or_default().insert(local);
               }
               self.resolve(reg, len)
@@ -1087,29 +1107,42 @@ impl UnitBuilder<'_, '_> {
       return;
     }
     for (local, target) in self.inv_spaces.clone() {
-      let pending = take(self.inv_pending.entry(local).or_default());
-      match pending[..] {
-        [] => self.code.push(Instr::Const { dst: target, value: 0 }),
-        [space] if space == target => {}
-        [space] => {
-          self.materialize(space);
-          self.code.push(Instr::Move { dst: target, src: space, len: 1 });
-        }
-        _ => {
-          // A task copies the value into each of the spaces.
-          let (_, len) = self.local_regs(local);
-          let mut task = self.new_task();
-          let value = self.alloc(len);
-          task.map.extend((0..len).map(|i| value.offset(i)));
-          for space in pending {
-            let space = self.task_input(&mut task, space, 1);
-            task.code.push(Instr::Write { space, src: value, len });
-          }
-          self.code.push(Instr::Space { dst: target, frame: task.frame, offset: 1 });
-          self.finish_task(task);
-        }
+      if self.inv_pending.get(&local).is_some_and(|p| p[..] == [target]) {
+        continue;
       }
+      // Holds do not carry over to other stages.
+      let space = self.merged_inverted_space(local);
+      self.require(space, 1);
+      self.code.push(Instr::Move { dst: target, src: space, len: 1 });
       self.inv_pending.insert(local, vec![target]);
+    }
+  }
+
+  /// Merges the spaces an inverted local's next value is written into into
+  /// one, returning a register holding it; the local has none left.
+  fn merged_inverted_space(&mut self, local: Local) -> Reg {
+    let pending = take(self.inv_pending.entry(local).or_default());
+    match pending[..] {
+      [] => self.null_space(),
+      [space] => {
+        self.materialize(space);
+        space
+      }
+      _ => {
+        // A task copies the value into each of the spaces.
+        let (_, len) = self.local_regs(local);
+        let mut task = self.new_task();
+        let value = self.alloc(len);
+        task.map.extend((0..len).map(|i| value.offset(i)));
+        for space in pending {
+          let space = self.task_input(&mut task, space, 1);
+          task.code.push(Instr::Write { space, src: value, len });
+        }
+        let space = self.alloc(1);
+        self.code.push(Instr::Space { dst: space, frame: task.frame, offset: 1 });
+        self.finish_task(task);
+        space
+      }
     }
   }
 
@@ -1423,7 +1456,7 @@ impl UnitBuilder<'_, '_> {
         let mut lazy = Vec::new();
         for local in self.locals.keys().collect::<Vec<_>>() {
           let input = matches!(interface.wires.get(&local), Some(&(true, _, _)));
-          if !input && (child || !owed.contains(&local)) {
+          if !input && (child || !owed.contains(&local)) || self.vir.locals[local].inv.0 {
             continue;
           }
           let (reg, len) = self.local_regs(local);
@@ -1478,7 +1511,7 @@ impl UnitBuilder<'_, '_> {
     // so they are resolved and made real. A later emission passes those which
     // are not available yet in holes.
     for (&local, &(input, _, _)) in &interface.wires {
-      if input && self.locals[local] != LocalState::Empty {
+      if input && self.locals[local] != LocalState::Empty && !self.vir.locals[local].inv.0 {
         self.note_waited_input(transfer.interface, local);
         let (reg, len) = self.local_value(local);
         self.materialize_range(reg, len);
@@ -1514,8 +1547,11 @@ impl UnitBuilder<'_, '_> {
       // The child only sees the locals of its interface; the others stay with
       // this stage.
       let locals = IdxVec::from_iter(self.locals.keys().map(|_| LocalState::Empty));
+      // An inverted local's value (its first write) stays here too.
       let valid = self.locals.iter().filter(|&(local, &state)| {
-        state == LocalState::Valid && !matches!(interface.wires.get(&local), Some(&(true, _, _)))
+        state == LocalState::Valid
+          && (!matches!(interface.wires.get(&local), Some(&(true, _, _)))
+            || self.vir.locals[local].inv.0)
       });
       for local in valid.map(|(l, _)| l).collect::<Vec<_>>() {
         outer.push(self.local_regs(local));
@@ -1532,6 +1568,7 @@ impl UnitBuilder<'_, '_> {
         owed: interface.wires.iter().filter(|(_, w)| w.2).map(|(&local, _)| local).collect(),
         mode: self.mode,
         detach_spaces: Vec::new(),
+        inv_out: Vec::new(),
       }
     } else {
       Context {
@@ -1543,6 +1580,7 @@ impl UnitBuilder<'_, '_> {
         owed,
         mode: self.mode,
         detach_spaces: self.detach_spaces.clone(),
+        inv_out: self.inv_out.clone(),
       }
     };
     // A branch on a constant only emits the stage taken; the other may not be
@@ -1591,6 +1629,9 @@ impl UnitBuilder<'_, '_> {
         self.inv_pending.insert(local, vec![space]);
       }
       for (&local, &(input, _, output)) in &interface.wires {
+        if self.vir.locals[local].inv.0 {
+          continue;
+        }
         if output {
           self.locals[local] = LocalState::Valid;
         } else if input {
@@ -1601,6 +1642,9 @@ impl UnitBuilder<'_, '_> {
       let mut lazy = Vec::new();
       let hinted = self.hints.returns.get(&point).cloned().unwrap_or_default();
       for (&local, &(_, _, output)) in &interface.wires {
+        if self.vir.locals[local].inv.0 {
+          continue;
+        }
         if output && (self.local_passed_on(index, local) || hinted.contains(&local)) {
           let (reg, len) = self.local_regs(local);
           if len != 0 {
@@ -1624,7 +1668,7 @@ impl UnitBuilder<'_, '_> {
   /// Records that a local passed to an interface was waited for, if it was not
   /// available, so that a later emission passes it in a hole.
   fn note_waited_input(&mut self, interface: InterfaceId, local: Local) {
-    if self.local_waits(local) {
+    if !self.vir.locals[local].inv.0 && self.local_waits(local) {
       self.wanted.inputs.entry(interface).or_default().insert(local);
     }
   }
@@ -1840,6 +1884,7 @@ impl UnitBuilder<'_, '_> {
       owed,
       mode: Some(point),
       detach_spaces: spaces,
+      inv_out: Vec::new(),
     };
     for target in interface.kind.stages() {
       self.queue.push((target, context.clone()));
@@ -1950,6 +1995,9 @@ impl UnitBuilder<'_, '_> {
       if len == 0 {
         continue;
       }
+      // An inverted local's environment is the space for the next value
+      // before the call, and a space for the space after it.
+      let len = if self.vir.locals[local].inv.0 { 1 } else { len };
       if input {
         env.push((local, EnvWords::Value(len)));
       }
@@ -1974,6 +2022,20 @@ impl UnitBuilder<'_, '_> {
       for &(local, words) in &env {
         let dst = regs.offset(offset);
         match words {
+          EnvWords::Value(_) if self.vir.locals[local].inv.0 => {
+            // The closure's writes go to the reads before it.
+            let space = self.merged_inverted_space(local);
+            self.move_regs(dst, space, 1);
+          }
+          EnvWords::Space if self.vir.locals[local].inv.0 => {
+            // Reads after the closure's last write go to the reads after it,
+            // whose space it returns.
+            let reg = self.alloc(1);
+            let space = self.pending_space(reg, 1);
+            self.hold(space);
+            self.move_regs(dst, space, 1);
+            self.inv_pending.insert(local, vec![reg]);
+          }
           EnvWords::Value(len) => {
             if self.locals[local] == LocalState::Empty {
               self.unsupported("a local read before it is written".into());
@@ -2043,6 +2105,10 @@ impl UnitBuilder<'_, '_> {
     for (local, words) in env {
       let src = regs.offset(offset);
       match words {
+        EnvWords::Value(_) if self.vir.locals[local].inv.0 => {
+          self.inv_pending.insert(local, vec![src]);
+        }
+        EnvWords::Space if self.vir.locals[local].inv.0 => self.inv_out.push((local, src)),
         EnvWords::Value(len) => {
           let (reg, _) = self.local_regs(local);
           self.move_regs(reg, src, len);
@@ -4114,6 +4180,7 @@ impl UnitBuilder<'_, '_> {
     for pending in self.inv_pending.values() {
       live.extend(pending.iter().map(|&space| (space, 1)));
     }
+    live.extend(self.inv_out.iter().map(|&(_, space)| (space, 1)));
     live.extend(self.temps.iter().copied());
     live.extend(self.live_wires());
     live.extend(self.ret_space.map(|r| (r, 1)));
