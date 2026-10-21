@@ -10,7 +10,8 @@ decision is made or something lands, change this file in the same commit.
 
 - `vine run --frames` compiles a program to frames bytecode and runs it.
 - `tests/frames.sh` runs `tests/programs` and `vine/examples` on frames and
-  compares their output with the IVM snapshots. See [Status](#status) for the
+  compares their output with the IVM snapshots (or IVM's output, for the
+  programs checked by `tests/verify`). See [Status](#status) for the
   latest numbers.
 - IVM still works (`vine run`, `vine build`), but compatibility with it is no
   longer a goal (see below).
@@ -216,45 +217,48 @@ in its registers, it waits for it, and records the local (`Hints`); the unit is
 then emitted again, passing it in a hole (at most a few times).
 
 **Detached branches**: a branch or match on a value which code after it
-produces (written through a virtual space, or computed by a task waiting for
-such values; see `future`) does not wait. The branch and the chain of stages
+produces (written through a virtual space, computed by a task waiting for such
+values, or held by a hole such code fills, e.g. a `lazy_inputs` hole a `Hints`
+entry asked for; see `future` and `future_holes`) does not wait. The branch and
+the chain of stages
 it starts run in a frame of their own (`detach`), entered at the branch, which
 receives the data and the locals the chain uses, and writes the locals it
 returns into holes; control goes on after the chain right away. E.g. in a loop,
 the next iteration starts before the branch of this one is decided, and fills
 it in later. Stages reached from a detached branch are emitted again for it
 (`Mode`), ending by writing the returned locals (`end_detached`) rather than
-returning.
+returning. `Hints` are only recorded for values produced later, so ordinary
+loops keep passing their locals in registers.
 
 **Inverted locals** (`~x`): their values flow backwards. A read of one becomes
 a space for its next write (`inv_pending`); a write delivers its value to the
 spaces of the reads since the previous write; reads after the last write
 receive the first write, as the scope ends. At stage boundaries, the spaces
 are merged into one, in a fixed register (`inv_spaces`). A branch on such a
-value is detached (above), so loops like `List::trim_back_where` work.
+value is detached (above), so loops like `List::trim_back_where` work. A
+closure capturing an inverted local receives the space of the reads before it
+in its environment (its first write delivers there), and gives back, when its
+call ends, a space for the reads in it that no write in it satisfied
+(`inv_out`); e.g. `Nat::sub` borrows through one.
 
 ## Status
 
-Last updated 2026-10-20 (`tests/frames.sh`, 83 programs):
+Last updated 2026-10-21 (`tests/frames.sh`, 83 programs):
 
-**60 of 83 pass.** Failing programs per error (a program can count more than
+**64 of 83 pass.** Failing programs per error (a program can count more than
 once):
 
 | Programs | Error                                                                   |
 | -------: | ----------------------------------------------------------------------- |
-|        8 | deadlock (`array_smoothsort`, `sort`, `par`, `regex`; and `Nat` arithmetic: `int_edges`, `nat_div`, `nat_edges`, `f64_roundabout`) |
+|        6 | deadlock (`array_smoothsort`, `sort`, `par`, `regex`, `int_edges`, `nat_edges`) |
 |        2 | inline Ivy (`IO::args`, `IO::File::create`)                             |
 |        1 | an inverted local read several times, of a type which is not plain data (`inverse`) |
 |        1 | infinite size (`life`: its streams are written through spaces)          |
-|        1 | hole read more than once (`f32_roundabout`)                             |
 |        3 | debug mode (`div_by_zero`, `option_party`, `iterator_party`)            |
 
-`Nat` subtraction (`Nat::sub`) uses an inverted local captured by a closure,
-which is not supported yet; most of the `Nat` failures come from it. The
-remaining failures have no error: `f32_ops` and `f64_ops` have no output
-snapshot; `json` prints wrong output; `segmented_sieve`, `lcs` and
-`mandelbrot_tga` take about 20s or more and exceed the timeout; and `lambda`
-hits an emitter panic.
+The remaining failures have no error: `json` prints wrong output;
+`segmented_sieve`, `lcs`, `mandelbrot_tga` and `f64_roundabout` (40s) exceed
+the timeout, with correct output; and `lambda` hits an emitter panic.
 
 Notes:
 
@@ -273,7 +277,6 @@ Notes:
 - Remaining `$ivy` blocks (120 in `root`) are fine when their function is an
   `#[intrinsic]`; others (`F64::fork`, `IO::args`, `IO::File::create`, …) need
   intrinsics.
-- Inverted locals captured by closures are not supported.
 - `cons`, `par`, `regex` and `unary` box their recursive types now; `life`
   writes its recursive streams through spaces, which a `Box` cannot express.
   Tests relying on erasure are marked `TODO(frames)`.

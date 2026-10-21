@@ -239,6 +239,9 @@ pub(super) fn emit_unit(
     let (code, next_reg, entries, wanted) =
       emit_unit_with(e, spec_id, fragment, vir, params.clone(), unit, hints.clone());
     attempt += 1;
+    if env::var("FRAMES_DEBUG").is_ok() && wanted != Hints::default() {
+      eprintln!("{}: attempt {attempt}, holes wanted for {wanted:?}", fragment.path);
+    }
     if wanted == hints || attempt == 4 {
       if env::var("FRAMES_DEBUG").is_ok() {
         let stages = entries.iter().map(|e| e.0).collect::<Vec<_>>();
@@ -296,6 +299,7 @@ fn emit_unit_with<'a>(
     tasks: Vec::new(),
     open_tasks: Vec::new(),
     in_task: HashMap::new(),
+    future_holes: HashSet::new(),
     reader_tasks: HashMap::new(),
     inv_spaces: HashMap::new(),
     inv_pending: HashMap::new(),
@@ -379,6 +383,8 @@ struct UnitBuilder<'e, 'a> {
   /// Registers whose values are computed by an open task: the task, and the
   /// task's register holding the value.
   in_task: HashMap<Reg, (usize, Reg)>,
+  /// Holes whose values come from code after them (see `future`).
+  future_holes: HashSet<Reg>,
   /// Open tasks created for steps which will read values written into them,
   /// by the index of the step.
   reader_tasks: HashMap<usize, usize>,
@@ -540,9 +546,13 @@ impl UnitBuilder<'_, '_> {
       }
     }
     self.lazy_locals.clear();
+    let hinted = self.hints.inputs.get(&stage.interface).cloned().unwrap_or_default();
     for (local, hole) in self.lazy_inputs.get(&stage.interface).cloned().unwrap_or_default() {
       let (reg, len) = self.local_regs(local);
       self.hold_regs(hole, (0..len).map(|i| reg.offset(i)).collect());
+      if hinted.contains(&local) {
+        self.future_holes.insert(hole);
+      }
       self.locals[local] = LocalState::Valid;
       self.lazy_locals.push(local);
     }
@@ -754,7 +764,7 @@ impl UnitBuilder<'_, '_> {
               moves.push((canonical, hole));
             }
             _ => {
-              if self.remote(reg, len) && !self.vir.locals[local].inv.0 {
+              if self.future(reg, len) && !self.vir.locals[local].inv.0 {
                 self.wanted.returns.entry(point).or_default().insert(local);
               }
               self.resolve(reg, len)
@@ -1125,7 +1135,11 @@ impl UnitBuilder<'_, '_> {
     match pending[..] {
       [] => self.null_space(),
       [space] => {
-        self.materialize(space);
+        // The value comes from later code.
+        if self.virtual_spaces.contains_key(&space) {
+          let hole = self.hold(space);
+          self.future_holes.insert(hole);
+        }
         space
       }
       _ => {
@@ -1381,7 +1395,7 @@ impl UnitBuilder<'_, '_> {
           }
           if index + 1 == stage.steps.len() && !creates_value(&interface.kind) {
             // A final transfer; the stage ends here.
-            return false;
+            break;
           }
         }
         _ => {}
@@ -1650,6 +1664,9 @@ impl UnitBuilder<'_, '_> {
           if len != 0 {
             let hole = self.alloc(1);
             self.hold_regs(hole, (0..len).map(|i| reg.offset(i)).collect());
+            if hinted.contains(&local) {
+              self.future_holes.insert(hole);
+            }
             lazy.push((local, hole));
           }
         }
@@ -1668,7 +1685,11 @@ impl UnitBuilder<'_, '_> {
   /// Records that a local passed to an interface was waited for, if it was not
   /// available, so that a later emission passes it in a hole.
   fn note_waited_input(&mut self, interface: InterfaceId, local: Local) {
-    if !self.vir.locals[local].inv.0 && self.local_waits(local) {
+    if self.vir.locals[local].inv.0 || self.locals[local] != LocalState::Valid {
+      return;
+    }
+    let (reg, len) = self.local_regs(local);
+    if self.future(reg, len) {
       self.wanted.inputs.entry(interface).or_default().insert(local);
     }
   }
@@ -1713,6 +1734,7 @@ impl UnitBuilder<'_, '_> {
     (0..len).map(|i| reg.offset(i)).any(|r| {
       self.unwritten.contains_key(&r)
         || self.in_task.get(&r).is_some_and(|&(task, _)| self.open_tasks[task].future)
+        || self.held.get(&r).is_some_and(|(hole, _)| self.future_holes.contains(hole))
     })
   }
 
@@ -1823,6 +1845,7 @@ impl UnitBuilder<'_, '_> {
           let space = self.alloc(1);
           self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
           self.hold_regs(hole, (0..len).map(|i| reg.offset(i)).collect());
+          self.future_holes.insert(hole);
           self.locals[local] = LocalState::Valid;
           space
         }
@@ -3314,7 +3337,7 @@ impl UnitBuilder<'_, '_> {
 
   /// Makes a virtual space real, pointing into a new hole, which holds its
   /// value.
-  fn hold(&mut self, space: Reg) {
+  fn hold(&mut self, space: Reg) -> Reg {
     let targets = self.virtual_spaces.remove(&space).unwrap();
     for target in &targets {
       self.unwritten.remove(target);
@@ -3323,6 +3346,7 @@ impl UnitBuilder<'_, '_> {
     self.code.push(Instr::HoleNew { dst: hole, len: targets.len() as u32 });
     self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
     self.hold_regs(hole, targets);
+    hole
   }
 
   /// Records that the hole in `hole` holds the values of `targets`.
@@ -4224,6 +4248,9 @@ impl UnitBuilder<'_, '_> {
       self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
       self.task_write(task, space, src, len);
       self.hold_regs(hole, (0..len).map(|j| src.offset(j)).collect());
+      if self.open_tasks[task].future {
+        self.future_holes.insert(hole);
+      }
       i += len;
     }
   }
