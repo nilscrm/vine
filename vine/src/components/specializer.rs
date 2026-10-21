@@ -378,6 +378,8 @@ fn synthetic_item_name(
 ) -> Name {
   match item {
     SyntheticItem::Identity => guide.synthetic_identity.to_name(),
+    SyntheticItem::Unbox => guide.synthetic_identity.with_payload(1u32),
+    SyntheticItem::Rebox => guide.synthetic_identity.with_payload(2u32),
     SyntheticItem::DebugState => guide.synthetic_debug_state.to_name(),
     SyntheticItem::CompositeDeconstruct(len) => {
       guide.synthetic_composite_deconstruct.with_payload(*len)

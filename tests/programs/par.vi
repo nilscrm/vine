@@ -70,7 +70,7 @@ mod Move {
 enum Outcome {
   Win(),
   Loss(),
-  Draw(Round),
+  Draw(Box[Round]),
 }
 
 type Round = Send[Move, Recv[Outcome, ()]];
@@ -122,9 +122,9 @@ fn start_playing(&io: &IO) -> Game {
       }
 
       let fn draw() {
-        player1 = outcome1.choose[P = Player](fn (x) { Draw(x) });
-        player2 = outcome2.choose[P = Player](fn (x) { Draw(x) });
-        player3 = outcome3.choose[P = Player](fn (x) { Draw(x) });
+        player1 = outcome1.choose[P = Player](fn (x) { Draw(Box(x)) });
+        player2 = outcome2.choose[P = Player](fn (x) { Draw(Box(x)) });
+        player3 = outcome3.choose[P = Player](fn (x) { Draw(Box(x)) });
         io.println("Draw...");
       }
 
@@ -157,7 +157,7 @@ fn random_player(&rng: &Pcg32) -> Player {
     }
   }
   Session::fork[Player](fn (round: Round) {
-    while round.send(random_move()).recv1() is Outcome::Draw(next_round) {
+    while round.send(random_move()).recv1() is Outcome::Draw(Box(next_round)) {
       round = next_round;
     }
   })

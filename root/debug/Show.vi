@@ -84,12 +84,24 @@ pub mod Show {
     max_width: N32,
     indent: N32,
   ) -> (N32, String, Bool) {
-    let loop multiline;
+    // The entries are formatted first, as whether they are put on lines of
+    // their own depends on their total width.
     let total_width = 0;
-    let str = "";
-    let first = true;
+    let parts = [];
     for entry in entries {
       total_width += 2;
+      let part = "";
+      for show in process_entry(entry) {
+        let (width, show_str) = show._format(max_width, indent + 2);
+        total_width += width;
+        part ++= show_str;
+      }
+      parts.push_back(part);
+    }
+    let multiline = total_width > max_width;
+    let str = "";
+    let first = true;
+    for part in parts {
       if multiline {
         str ++= newline(indent + 2);
       } else {
@@ -97,11 +109,7 @@ pub mod Show {
           str ++= ", ";
         }
       }
-      for show in process_entry(entry) {
-        let (width, show_str) = show._format(max_width, indent + 2);
-        total_width += width;
-        str ++= show_str;
-      }
+      str ++= part;
       if multiline {
         str ++= ",";
       }
@@ -110,7 +118,6 @@ pub mod Show {
     if multiline {
       str ++= newline(indent);
     }
-    multiline = total_width > max_width;
     (total_width, str, multiline)
   }
 
@@ -229,6 +236,7 @@ pub mod Show {
   }
 }
 
+#[size = 1]
 type Repl;
 #[builtin = "repl_show"]
 fn repl_show[T; Show[T]](repl: Repl, &value: &T) {

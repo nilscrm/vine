@@ -134,6 +134,12 @@ impl<'src> Parser<'src> {
           self.expect(Token::Eq)?;
           AttrKind::Intrinsic(self.parse_string()?)
         }
+        "size" => {
+          self.expect(Token::Eq)?;
+          let span = self.span();
+          let token = self.expect(Token::Num)?;
+          AttrKind::Size(self.parse_u32_like(token, |_| Diag::InvalidNum { span })?)
+        }
         _ => Err(Diag::UnknownAttribute { span: ident_span })?,
       }
     };

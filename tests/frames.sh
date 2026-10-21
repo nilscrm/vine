@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs tests/programs and vine/examples on the frames runtime, comparing their
-# output with the (IVM) snapshots in tests/snaps, and summarizes why the
-# failing ones fail.
+# output with the (IVM) snapshots in tests/snaps (or with IVM's output, for
+# programs without one), and summarizes why the failing ones fail.
 #
 # Usage: tests/frames.sh [name-filter]
 #
@@ -35,9 +35,16 @@ run_one() { # kind name vi config
   local build input ext
   build=$(directive "$config" build "")
   input=tests/input/$(directive "$config" input empty)
-  ext=$(directive "$config" ext txt)
+  ext=$(directive "$config" output txt)
   local expected=tests/snaps/$kind/$name/output.$ext
   local out=$OUT/$kind-$name.out.$ext
+  if [ ! -f "$expected" ]; then
+    # Some outputs are checked by tests/verify instead of a snapshot; compare
+    # with IVM's output.
+    expected=$OUT/$kind-$name.ivm.$ext
+    # shellcheck disable=SC2086
+    $VINE run --no-stats "$vi" $build <"$input" >"$expected" 2>/dev/null
+  fi
   # `perl -e alarm` is a portable `timeout`.
   # shellcheck disable=SC2086
   perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" \

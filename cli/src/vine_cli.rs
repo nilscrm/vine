@@ -3,6 +3,7 @@ use frames::{
   runtime::{Host as FramesHost, Runtime},
 };
 use std::{
+  cmp::Reverse,
   collections::HashMap,
   env,
   ffi::OsStr,
@@ -237,20 +238,34 @@ impl VineRunCommand {
       let result = compiler.frames_program();
       eprint_diags(&compiler);
       let Ok(program) = result else { exit(1) };
+      if env::var("FRAMES_CHECK").is_ok() {
+        for error in program.check_registers() {
+          eprintln!("frames check: {error}");
+        }
+      }
       if env::var("FRAMES_DUMP").is_ok() {
         eprintln!("{program}");
       }
       let ops = Ops::new();
       let mut runtime = Runtime::new(&program, &ops, FramesHost::stdio())?;
       runtime.trace = env::var("FRAMES_TRACE").is_ok();
+      runtime.profile = env::var("FRAMES_PROFILE").is_ok();
       let result = runtime.run();
+      if runtime.profile {
+        let mut counts = runtime.counts.iter().collect::<Vec<_>>();
+        counts.sort_by_key(|&(key, count)| (Reverse(*count), key.clone()));
+        for ((unit, pc), count) in counts.into_iter().take(40) {
+          eprintln!("profile: {count:>10} {unit} @ {pc}");
+        }
+      }
       if !self.run_args.no_stats() {
         let stats = &runtime.stats;
         eprintln!(
-          "\nframes: {} blocks, {} instructions, {} frames, {} heap words at peak, {} objects leaked, {:?}",
+          "\nframes: {} blocks, {} instructions, {} frames, {} holes, {} heap words at peak, {} objects leaked, {:?}",
           stats.blocks_run,
           stats.instructions,
           stats.frames,
+          stats.holes,
           runtime.heap.stats.peak_words,
           runtime.heap.live_objects(),
           stats.time,

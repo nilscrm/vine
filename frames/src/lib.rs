@@ -18,6 +18,8 @@
 //! "returns" by writing its result into it, which may make the caller's
 //! continuation frame ready.
 //!
+//! A space into frame `0` discards what is written into it.
+//!
 //! A *hole* is a frame whose code is supplied later: its slots receive a
 //! value through spaces, like any other frame, but what happens to the value
 //! is decided by the hole's reader, which supplies the code afterwards; e.g.

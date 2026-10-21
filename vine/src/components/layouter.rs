@@ -32,7 +32,6 @@ pub struct Layout {
 
 impl Layout {
   const EMPTY: Layout = Layout { size: 0, plain: true };
-  const WORD: Layout = Layout { size: 1, plain: true };
   const HANDLE: Layout = Layout { size: 1, plain: false };
 }
 
@@ -140,7 +139,7 @@ impl<'a> Layouter<'a> {
         let value = self.concat(children)?;
         Layout { size: value.size + 1, plain: false }
       }
-      LayoutKind::Opaque(id) => self.opaque_layout(*id),
+      LayoutKind::Opaque(id) => self.opaque_layout(*id)?,
       // The contents of a box do not affect its layout.
       LayoutKind::Struct(id) if Some(*id) == self.chart.builtins.box_ => Layout::HANDLE,
       LayoutKind::Struct(id) => {
@@ -158,6 +157,12 @@ impl<'a> Layouter<'a> {
       LayoutKind::Union(id) => {
         let sig = &sigs.unions[*id];
         union(&self.variant_layouts(&sig.types, sig.inner.variant_data.values(), children)?)
+      }
+      // The frames runtime has no debug mode.
+      LayoutKind::IfConst(id)
+        if Some(self.chart.concrete_consts[*id].def) == self.chart.builtins.debug_enabled =>
+      {
+        self.term_layout(children[1].clone())?
       }
       LayoutKind::IfConst(_) => {
         let branches = children
@@ -198,8 +203,20 @@ impl<'a> Layouter<'a> {
   /// Opaque types are a single word: primitives, or handles to values owned
   /// by the host, which the runtime treats as plain data. A `Hole` is a
   /// pointer to a frame.
-  fn opaque_layout(&self, id: OpaqueTypeId) -> Layout {
-    if Some(id) == self.chart.builtins.hole { Layout::HANDLE } else { Layout::WORD }
+  /// A hole is a handle; other opaque types are plain data of their declared
+  /// size.
+  fn opaque_layout(&mut self, id: OpaqueTypeId) -> Result<Layout, ErrorGuaranteed> {
+    if Some(id) == self.chart.builtins.hole {
+      return Ok(Layout::HANDLE);
+    }
+    let opaque = &self.chart.opaque_types[id];
+    match opaque.size {
+      Some(size) => Ok(Layout { size, plain: true }),
+      None => {
+        let ty = self.chart.defs[opaque.def].path.clone();
+        Err(self.diags.error(Diag::MissingOpaqueSize { span: opaque.span, ty }))
+      }
+    }
   }
 
   fn infinite_size(&mut self, Term(kind, _): &Term) -> ErrorGuaranteed {

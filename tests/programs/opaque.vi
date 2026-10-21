@@ -1,6 +1,7 @@
 
 use #root::util::{erase, transmute};
 
+#[size = 0]
 pub type A;
 
 pub mod A {
