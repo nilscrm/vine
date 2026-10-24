@@ -214,7 +214,12 @@ returned from child stages which are only passed on are returned in holes too
 (`lazy_returns`). If a transfer finds a local not available yet which an
 earlier transfer into the same interface (e.g. a loop's entry) decided to pass
 in its registers, it waits for it, and records the local (`Hints`); the unit is
-then emitted again, passing it in a hole (at most a few times).
+then emitted again, passing it in a hole. Holes holding values produced by
+code after them are recorded too wherever they are passed on (into another
+interface, returned from a child stage, or captured by a closure, whose
+environment then holds a hole for the value rather than the value, as it is
+taken at once), so that the stages receiving them know not to wait for them.
+Hints only grow between emissions (at most `MAX_ATTEMPTS`).
 
 **Detached branches**: a branch or match on a value which code after it
 produces (written through a virtual space, computed by a task waiting for such
@@ -233,7 +238,8 @@ loops keep passing their locals in registers.
 **Inverted locals** (`~x`): their values flow backwards. A read of one becomes
 a space for its next write (`inv_pending`); a write delivers its value to the
 spaces of the reads since the previous write; reads after the last write
-receive the first write, as the scope ends. At stage boundaries, the spaces
+receive the first write, as the scope ends (the first write need not be in the
+stage declaring the local, e.g. after an early return). At stage boundaries, the spaces
 are merged into one, in a fixed register (`inv_spaces`). A branch on such a
 value is detached (above), so loops like `List::trim_back_where` work. A
 closure capturing an inverted local receives the space of the reads before it
@@ -243,22 +249,22 @@ call ends, a space for the reads in it that no write in it satisfied
 
 ## Status
 
-Last updated 2026-10-21 (`tests/frames.sh`, 83 programs):
+Last updated 2026-10-24 (`tests/frames.sh`, 83 programs):
 
-**64 of 83 pass.** Failing programs per error (a program can count more than
+**65 of 83 pass.** Failing programs per error (a program can count more than
 once):
 
 | Programs | Error                                                                   |
 | -------: | ----------------------------------------------------------------------- |
-|        6 | deadlock (`array_smoothsort`, `sort`, `par`, `regex`, `int_edges`, `nat_edges`) |
+|        4 | deadlock (`array_smoothsort`, `sort`, `par`, `regex`)                    |
 |        2 | inline Ivy (`IO::args`, `IO::File::create`)                             |
 |        1 | an inverted local read several times, of a type which is not plain data (`inverse`) |
 |        1 | infinite size (`life`: its streams are written through spaces)          |
 |        3 | debug mode (`div_by_zero`, `option_party`, `iterator_party`)            |
 
 The remaining failures have no error: `json` prints wrong output;
-`segmented_sieve`, `lcs`, `mandelbrot_tga` and `f64_roundabout` (40s) exceed
-the timeout, with correct output; and `lambda` hits an emitter panic.
+`segmented_sieve`, `lcs`, `mandelbrot_tga`, `f64_roundabout` (40s) and
+`nat_edges` (27s) exceed the timeout, with correct output; and `lambda` hits an emitter panic.
 
 Notes:
 

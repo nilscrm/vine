@@ -208,6 +208,20 @@ pub(super) struct Hints {
   returns: BTreeMap<ReturnPoint, BTreeSet<Local>>,
 }
 
+impl Hints {
+  fn merge(&mut self, other: Hints) {
+    for (interface, locals) in other.inputs {
+      self.inputs.entry(interface).or_default().extend(locals);
+    }
+    for (point, locals) in other.returns {
+      self.returns.entry(point).or_default().extend(locals);
+    }
+  }
+}
+
+/// How many times a unit is emitted at most (see `emit_unit`).
+const MAX_ATTEMPTS: usize = 12;
+
 /// Where control goes once a stage finishes without a final transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ReturnPoint {
@@ -231,7 +245,9 @@ pub(super) fn emit_unit(
   let Ok(params) = e.type_param_terms(spec_id, fragment.generics) else { return (unit, vec![]) };
   // A unit is emitted again if some transfers found locals not available yet
   // which they could not pass in holes, as earlier transfers into the same
-  // interface decided otherwise; at most a few times.
+  // interface decided otherwise, or passed holes holding values produced later
+  // which the stages receiving them did not know of. Hints only grow, as
+  // knowing of one such hole can reveal others; at most a few times.
   let mut hints = Hints::default();
   let mut attempt = 0;
   loop {
@@ -242,7 +258,9 @@ pub(super) fn emit_unit(
     if env::var("FRAMES_DEBUG").is_ok() && wanted != Hints::default() {
       eprintln!("{}: attempt {attempt}, holes wanted for {wanted:?}", fragment.path);
     }
-    if wanted == hints || attempt == 4 {
+    let mut merged = hints.clone();
+    merged.merge(wanted);
+    if merged == hints || attempt == MAX_ATTEMPTS {
       if env::var("FRAMES_DEBUG").is_ok() {
         let stages = entries.iter().map(|e| e.0).collect::<Vec<_>>();
         eprintln!("{}: entries {stages:?}", fragment.path);
@@ -257,7 +275,7 @@ pub(super) fn emit_unit(
         e.program.blocks[block] = e.dead_block_value();
       }
     }
-    hints = wanted;
+    hints = merged;
   }
 }
 
@@ -558,8 +576,14 @@ impl UnitBuilder<'_, '_> {
     }
 
     let root = self.roots().contains(&stage_id);
+    // Inverted locals written before the stage are passed to it; others are
+    // written for the first time in it (e.g. one declared before an early
+    // return, and written after it).
     let declared = &self.vir.stages[stage_id].declarations;
-    self.inv_started = self.inv_spaces.keys().filter(|l| !declared.contains(l)).copied().collect();
+    self.inv_started = (self.inv_spaces.keys())
+      .filter(|l| !declared.contains(l) && interface.wires.contains_key(l))
+      .copied()
+      .collect();
     self.inv_pending.clear();
     let start = self.label();
     if self.mode.is_none() {
@@ -757,18 +781,16 @@ impl UnitBuilder<'_, '_> {
             continue;
           }
           let (reg, len) = self.local_value(local);
+          if self.future(reg, len) && !self.vir.locals[local].inv.0 {
+            self.wanted.returns.entry(point).or_default().insert(local);
+          }
           match lazy.iter().find(|&&(l, _)| l == local) {
             Some(&(_, canonical)) if len != 0 => {
               let hole = self.hole_holding(reg, len);
               self.temps.push((hole, 1));
               moves.push((canonical, hole));
             }
-            _ => {
-              if self.future(reg, len) && !self.vir.locals[local].inv.0 {
-                self.wanted.returns.entry(point).or_default().insert(local);
-              }
-              self.resolve(reg, len)
-            }
+            _ => self.resolve(reg, len),
           }
         }
         self.merge_inverted();
@@ -1509,6 +1531,10 @@ impl UnitBuilder<'_, '_> {
         hole
       } else {
         let (reg, len) = self.local_value(local);
+        // Keep the hole known to hold a value produced later.
+        if self.future(reg, len) {
+          self.wanted.inputs.entry(transfer.interface).or_default().insert(local);
+        }
         self.locals[local] = LocalState::Empty;
         self.hole_holding(reg, len)
       };
@@ -2009,10 +2035,12 @@ impl UnitBuilder<'_, '_> {
   // Closures
 
   /// The words of the environment of a closure: for each local the closure's
-  /// stages take as input, its value; for each local they output, a space for
-  /// its final value.
+  /// stages take as input, its value (or a hole holding it, if it may be
+  /// produced by code after the closure; see `Hints`); for each local they
+  /// output, a space for its final value.
   fn closure_env(&mut self, interface: InterfaceId) -> Vec<(Local, EnvWords)> {
     let mut env = Vec::new();
+    let held = self.hints.inputs.get(&interface).cloned().unwrap_or_default();
     for (&local, &(input, _, output)) in &self.vir.interfaces[interface].wires {
       let (_, len) = self.local_regs(local);
       if len == 0 {
@@ -2020,9 +2048,13 @@ impl UnitBuilder<'_, '_> {
       }
       // An inverted local's environment is the space for the next value
       // before the call, and a space for the space after it.
-      let len = if self.vir.locals[local].inv.0 { 1 } else { len };
+      let inv = self.vir.locals[local].inv.0;
+      let len = if inv { 1 } else { len };
       if input {
-        env.push((local, EnvWords::Value(len)));
+        env.push((
+          local,
+          if !inv && held.contains(&local) { EnvWords::Held } else { EnvWords::Value(len) },
+        ));
       }
       if output {
         env.push((local, EnvWords::Space));
@@ -2036,6 +2068,9 @@ impl UnitBuilder<'_, '_> {
     let interface = &self.vir.interfaces[transfer.interface];
     let env = self.closure_env(transfer.interface);
     let size = env.iter().map(|(_, words)| words.len()).sum::<u32>();
+    // The closure's reads of an inverted local receive values from code after
+    // it, so the final values it writes back may too.
+    let inverted = env.iter().any(|&(local, _)| self.vir.locals[local].inv.0);
     let closure = self.alloc(1);
     if size == 0 {
       self.code.push(Instr::Const { dst: closure, value: 0 });
@@ -2059,18 +2094,29 @@ impl UnitBuilder<'_, '_> {
             self.move_regs(dst, space, 1);
             self.inv_pending.insert(local, vec![reg]);
           }
-          EnvWords::Value(len) => {
+          EnvWords::Value(_) | EnvWords::Held => {
             if self.locals[local] == LocalState::Empty {
               self.unsupported("a local read before it is written".into());
             } else {
               let (_, barrier, output) = interface.wires[&local];
-              if !barrier && !output && self.used_later(index, local) {
-                let copy = self.fork(Span::NONE, local);
-                self.move_regs(dst, copy, len);
+              let (value, len) = if !barrier && !output && self.used_later(index, local) {
+                let (_, len) = self.local_regs(local);
+                (self.fork(Span::NONE, local), len)
               } else {
-                let (reg, _) = self.local_value(local);
+                let (reg, len) = self.local_value(local);
                 self.locals[local] = LocalState::Empty;
-                self.move_regs(dst, reg, len);
+                (reg, len)
+              };
+              if let EnvWords::Held = words {
+                let hole = self.hole_holding(value, len);
+                self.move_regs(dst, hole, 1);
+              } else {
+                // The closure's environment is taken at once; a value produced
+                // later is passed in a hole by the next emission.
+                if self.future(value, len) {
+                  self.wanted.inputs.entry(transfer.interface).or_default().insert(local);
+                }
+                self.move_regs(dst, value, len);
               }
             }
           }
@@ -2079,7 +2125,10 @@ impl UnitBuilder<'_, '_> {
             // hole.
             let (reg, len) = self.local_regs(local);
             let space = self.pending_space(reg, len);
-            self.hold(space);
+            let hole = self.hold(space);
+            if inverted {
+              self.future_holes.insert(hole);
+            }
             self.move_regs(dst, space, 1);
             self.locals[local] = LocalState::Valid;
           }
@@ -2135,6 +2184,12 @@ impl UnitBuilder<'_, '_> {
         EnvWords::Value(len) => {
           let (reg, _) = self.local_regs(local);
           self.move_regs(reg, src, len);
+          self.locals[local] = LocalState::Valid;
+        }
+        EnvWords::Held => {
+          let (reg, len) = self.local_regs(local);
+          self.hold_regs(src, (0..len).map(|i| reg.offset(i)).collect());
+          self.future_holes.insert(src);
           self.locals[local] = LocalState::Valid;
         }
         EnvWords::Space => self.at_end.push((local, AtEnd::Write(src))),
@@ -3655,6 +3710,10 @@ impl UnitBuilder<'_, '_> {
           continue;
         }
         let space = self.wire_space(port);
+        if self.open_tasks[task].future && self.virtual_spaces.contains_key(&space) {
+          let hole = self.hold(space);
+          self.future_holes.insert(hole);
+        }
         let reg = self.open_task_input(task, space, 1);
         flow.wires.insert(key, WireState::ReaderSpace(reg));
       } else if !self.wires.contains_key(&key) {
@@ -4404,6 +4463,8 @@ impl AtEnd {
 #[derive(Debug, Clone, Copy)]
 enum EnvWords {
   Value(u32),
+  /// A hole holding the value.
+  Held,
   Space,
 }
 
@@ -4411,7 +4472,7 @@ impl EnvWords {
   fn len(self) -> u32 {
     match self {
       EnvWords::Value(len) => len,
-      EnvWords::Space => 1,
+      EnvWords::Held | EnvWords::Space => 1,
     }
   }
 }
