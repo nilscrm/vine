@@ -211,6 +211,13 @@ impl Charter<'_> {
           };
           self.chart.concrete_fns[concrete_fn_id].frameless = true;
         }
+        AttrKind::Size(size) => {
+          let ChartedItem::OpaqueType(_, opaque_id) = item else {
+            self.diags.error(Diag::BadSizeAttr { span });
+            continue;
+          };
+          self.chart.opaque_types[opaque_id].size = Some(size);
+        }
         AttrKind::Intrinsic(name) => {
           let Some(concrete_fn_id) = concrete_fn_id else {
             self.diags.error(Diag::BadIntrinsicAttr { span });

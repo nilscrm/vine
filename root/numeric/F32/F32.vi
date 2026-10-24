@@ -3,6 +3,7 @@ use ops::{Cast, arithmetic::{Add, Div, Mul, Neg, Pos, Pow, Rem, Sub}, comparison
 use util::{duplicate, erase};
 
 #[builtin = "F32"]
+#[size = 1]
 pub type F32;
 
 mod common;

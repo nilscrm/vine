@@ -276,6 +276,7 @@ impl Builtins {
       opaque,
       default,
       debug_state,
+      debug_enabled,
       show,
       repl_show,
     } = self;
@@ -326,6 +327,7 @@ impl Builtins {
     revert_idx(opaque, checkpoint.traits);
     revert_idx(default, checkpoint.traits);
     revert_fn(debug_state, checkpoint);
+    revert_idx(debug_enabled, checkpoint.defs);
     revert_idx(show, checkpoint.traits);
     revert_fn(repl_show, checkpoint);
   }

@@ -5,6 +5,7 @@ use util::transmute;
 
 /// An extrinsic value logically representing a Vine value of type `T`.
 /// The author of `T` is allowed to decide the representation of this type.
+#[size = 1]
 pub type Ext[T];
 
 /// Conversion between `T` and `Ext[T]`.
@@ -148,5 +149,6 @@ pub mod Ext {
   }
 
   /// Used to mark extrinsic values of an unknown type.
+  #[size = 1]
   pub type Unknown;
 }

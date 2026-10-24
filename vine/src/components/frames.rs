@@ -45,10 +45,10 @@ pub struct FramesEmitter<'a> {
   entries: HashMap<(SpecId, StageId), BlockId>,
   queue: Vec<SpecId>,
   queued: HashSet<SpecId>,
-  /// Blocks whose frames discard a value of a given size.
-  discard: HashMap<u32, BlockId>,
   /// Blocks whose frames write a value of a given size into a space.
   write: HashMap<u32, BlockId>,
+  /// The unit of blocks which are not used.
+  dead_unit: Option<UnitId>,
 }
 
 impl<'a> FramesEmitter<'a> {
@@ -88,8 +88,8 @@ impl<'a> FramesEmitter<'a> {
       entries: HashMap::new(),
       queue: Vec::new(),
       queued: HashSet::new(),
-      discard: HashMap::new(),
       write: HashMap::new(),
+      dead_unit: None,
     }
   }
 
@@ -175,18 +175,19 @@ impl<'a> FramesEmitter<'a> {
     }
   }
 
-  /// Returns a block whose frames receive a value of `len` words, and discard
-  /// it.
-  pub(crate) fn discard_block(&mut self, len: u32) -> BlockId {
-    if let Some(&block) = self.discard.get(&len) {
-      return block;
-    }
-    let unit =
-      self.program.units.push(Unit { name: "discard".into(), regs: len, code: vec![Instr::End] });
-    let block =
-      self.program.blocks.push(Block { unit, entry: Label(0), frame: (0..len).map(Reg).collect() });
-    self.discard.insert(len, block);
-    block
+  /// A block which does nothing, for blocks of an emission of a unit which is
+  /// not used.
+  pub(crate) fn dead_block_value(&mut self) -> Block {
+    let unit = match self.dead_unit {
+      Some(unit) => unit,
+      None => {
+        let unit =
+          self.program.units.push(Unit { name: "dead".into(), regs: 0, code: vec![Instr::End] });
+        self.dead_unit = Some(unit);
+        unit
+      }
+    };
+    Block { unit, entry: Label(0), frame: vec![] }
   }
 
   /// Returns a block whose frames receive a space, and a value of `len`

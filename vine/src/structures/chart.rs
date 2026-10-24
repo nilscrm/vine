@@ -197,6 +197,8 @@ pub struct OpaqueTypeDef {
   pub def: DefId,
   pub name: Ident,
   pub generics: GenericsId,
+  /// The number of words its values take, on the frames runtime.
+  pub size: Option<u32>,
 }
 
 new_idx!(pub TypeAliasId);

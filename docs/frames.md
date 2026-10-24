@@ -10,7 +10,8 @@ decision is made or something lands, change this file in the same commit.
 
 - `vine run --frames` compiles a program to frames bytecode and runs it.
 - `tests/frames.sh` runs `tests/programs` and `vine/examples` on frames and
-  compares their output with the IVM snapshots. See [Status](#status) for the
+  compares their output with the IVM snapshots (or IVM's output, for the
+  programs checked by `tests/verify`). See [Status](#status) for the
   latest numbers.
 - IVM still works (`vine run`, `vine build`), but compatibility with it is no
   longer a goal (see below).
@@ -55,7 +56,11 @@ These were decided together with Nils; don't revisit them without asking.
   union). A `Vec`-like type may come later.
 - **Explicit `Box[T]`** controls what is heap-allocated vs. stored inline.
   Recursive types without a `Box` are a compile error ("infinite size"), as in
-  Rust. `Box` is not self-dual. Values carry no tags.
+  Rust. `Box` is not self-dual. Values carry no tags. A box is a hole holding
+  its contents, so boxing and unboxing never wait.
+- **No debug mode on frames**: `debug::enabled` (`#[builtin = "debug_enabled"]`)
+  is `false`, both for `if const` branches and for the layout of `if const`
+  types, which is that of the `else` branch.
 - **Layout specialization without two phases**: every type parameter has a
   hidden `Layout[T]` implementation parameter, so the existing specializer
   (which specializes by implementations) specializes by layout.
@@ -63,35 +68,26 @@ These were decided together with Nils; don't revisit them without asking.
   stages; locals live in registers; units are entered through *blocks*. Calling
   convention: one slot per parameter, plus a return space unless the return type
   is empty. Constants are evaluated per use.
-- **Waiting**: first a strict version (wait at the first use), then let pending
-  values flow through locals, data and calls (directly into slots when the
-  consumer is known, compiler-introduced holes otherwise). The second part is
-  partly done; see [Waiting](#waiting).
-
-### Open question: laziness of strict steps
-
-Many test programs rely on IVM's evaluation order, where each node waits only
-for its own inputs. The smallest example:
-
-```vi
-let i = 0;
-let f = fn* () { let n = i; i += 1; n };
-let g = f;                       // fork: f continues from g's final state
-io.println("{f()} {g()} {i}");   // IVM prints "1 0 2"
-```
-
-`f()` can only finish after `g()`, but building the string waits for `f()`'s
-text before `g()` is called, so frames deadlocks. Options:
-
-- **A — detach strict steps**: when a strict step (string or list building, an
-  operation) has inputs which aren't available yet, and its result is only
-  passed on, compile it into its own small frame, so that only it waits. Close
-  to IVM's semantics; costs a hole and a frame where it triggers.
-- **B — accept a stricter order**: rewrite the stdlib functions and tests which
-  rely on it. Cheaper and more predictable, but some valid programs deadlock.
-
-The leaning was towards A, limited to that case. **This is not decided; ask Nils
-before implementing either.**
+- **Waiting is dataflow** (decided 2026-10-17, settling the laziness
+  question in favour of detaching): a step waits only for its own inputs. A
+  step which reads values that are not available yet is emitted into a *task*,
+  a small frame of the same unit, and the code emitting it goes on; values whose
+  reader is not known yet are held in holes. Only control flow waits: a branch
+  or match on a value that is not available yet, and locals passed to another
+  stage (except those produced after the transfer, which are passed in holes).
+  See [Waiting](#waiting). Steps which only wait for values one task computes
+  are emitted into that task, and values are written directly into the frames
+  of the tasks reading them where possible.
+- **Limits of dataflow on frames**, where the standard library is adapted
+  instead:
+  - A frame waits for all of its words, so a match on an enum waits for its
+    payload too, and a value written through one space arrives all at once.
+    E.g. `IterRef::advance` borrows a stream's head and tail with one `as_ref`
+    (`Stream::head_tail`), as borrowing the tail second would wait for the head
+    to be released.
+  - Control flow cannot wait for a value produced after it (e.g. a branch on a
+    `let loop` value inside the loop that computes it); `format_comma_sep`
+    formats its entries first, then decides on the layout.
 
 ## Architecture
 
@@ -152,8 +148,9 @@ analyzer (interface wires `(input, barrier, output)` per local), specializer
 - **Stages** are code in the unit. A transfer which is a stage's last step is a
   jump; an earlier transfer is like a call into a *child* stage chain, which
   returns to the step after it (`ReturnPoint::After`). Child stages only see the
-  locals of their interface. Outputs of a stage's interface are preserved across
-  jumps until control returns.
+  locals of their interface. The outputs of the interface a chain of stages was
+  entered through are *owed*: kept across final transfers, and returned once
+  control returns.
 - Steps which only move data (composites, refs, rewraps, links, enums, unions)
   are deferred until their inputs exist, and until the readers of the spaces
   they create are known.
@@ -172,60 +169,128 @@ analyzer (interface wires `(input, barrier, output)` per local), specializer
 
 ### Waiting
 
-There are three kinds of values not available yet:
+There are four kinds of values not available yet:
 
 1. **Virtual**: a space for a value this unit will produce itself, which only
-   exists at compile time; writing it just moves registers. It becomes real when
-   it escapes (e.g. into a callee's frame).
-2. **Pending**: the value will arrive in the current *continuation frame*.
-   Reading it *suspends*: the live registers are saved into the continuation
-   frame and the block ends, resuming once it is ready. Suspending waits for
-   **all** pending values, which can deadlock if one of them only arrives later.
-3. **Held**: the value is held by a hole. Writing it somewhere forwards the hole
-   without waiting; only reading it waits (it then becomes pending). Values only
-   passed on (into locals, calls, data or the result) are held; see `passed_on`.
-   Locals returned from child stages which are only passed on are returned in
-   fixed hole registers (`lazy_returns`), since the code after a return point is
-   shared by every path.
+   exists at compile time; writing it just moves registers. It becomes real
+   when it escapes (e.g. into a callee's frame), or at a stage boundary; its
+   value is then held.
+2. **Held**: the value is held by a hole. Writing it into a space forwards the
+   hole; moving it only changes which registers the hole's words belong in. A
+   hole whose words are used separately is split by a task (`align_holes`).
+3. **In a task**: a step which reads values which are not available (an
+   operation, building a string or list, an IO call, ...) is emitted by
+   `emit_detached` into a task: the main code fills the task's frame with the
+   step's inputs (forwarding holes, or pointing virtual spaces into it), and
+   the step's code runs in the task once they have all arrived. Tasks stay
+   *open* until the block filling their frames ends (`close_tasks`):
+   - Values a step computes stay in its task (`in_task`). A later step whose
+     waiting inputs are all computed by one open task is emitted into that
+     task (`task_of`), which then waits for nothing more; this groups steps by
+     the values they wait for.
+   - Where a value computed by a task is used elsewhere, the task writes it
+     there: into a callee's frame, another task's frame, or a space
+     (`task_write`); into a hole if it is still used when the task closes
+     (`release`).
+   - A call's result which a later step of the block reads is written
+     directly into the frame of the task that step is emitted into
+     (`reader_tasks`); one which the next transfer waits for arrives in the
+     continuation frame (`awaited_by_transfer`).
+
+   Operations write references back before they wait, since they do not
+   change them. Copies of values which are not available yet, writes into
+   spaces which are not, and unboxing a box which is not are one-off tasks.
+4. **Pending**: control flow which needs a value (a branch condition, the data
+   matched on, a closure's environment, locals passed to another stage)
+   *suspends*: the values it needs are forwarded into a *continuation frame*,
+   along with the live registers, and the block ends. Nothing else is pending,
+   so this waits only for what the control flow needs.
+
+At a transfer, locals whose values are produced by code after it (read before
+they are written, or borrowed by a reference the target takes), or which came
+into the stage in holes, are passed in holes in fixed registers
+(`lazy_inputs`), which all transfers into an interface agree on. Locals
+returned from child stages which are only passed on are returned in holes too
+(`lazy_returns`). If a transfer finds a local not available yet which an
+earlier transfer into the same interface (e.g. a loop's entry) decided to pass
+in its registers, it waits for it, and records the local (`Hints`); the unit is
+then emitted again, passing it in a hole. Holes holding values produced by
+code after them are recorded too wherever they are passed on (into another
+interface, returned from a child stage, or captured by a closure, whose
+environment then holds a hole for the value rather than the value, as it is
+taken at once), so that the stages receiving them know not to wait for them.
+Hints only grow between emissions (at most `MAX_ATTEMPTS`).
+
+**Detached branches**: a branch or match on a value which code after it
+produces (written through a virtual space, computed by a task waiting for such
+values, or held by a hole such code fills, e.g. a `lazy_inputs` hole a `Hints`
+entry asked for; see `future` and `future_holes`) does not wait. The branch and
+the chain of stages
+it starts run in a frame of their own (`detach`), entered at the branch, which
+receives the data and the locals the chain uses, and writes the locals it
+returns into holes; control goes on after the chain right away. E.g. in a loop,
+the next iteration starts before the branch of this one is decided, and fills
+it in later. Stages reached from a detached branch are emitted again for it
+(`Mode`), ending by writing the returned locals (`end_detached`) rather than
+returning. `Hints` are only recorded for values produced later, so ordinary
+loops keep passing their locals in registers.
+
+**Inverted locals** (`~x`): their values flow backwards. A read of one becomes
+a space for its next write (`inv_pending`); a write delivers its value to the
+spaces of the reads since the previous write; reads after the last write
+receive the first write, as the scope ends (the first write need not be in the
+stage declaring the local, e.g. after an early return). At stage boundaries, the spaces
+are merged into one, in a fixed register (`inv_spaces`). A branch on such a
+value is detached (above), so loops like `List::trim_back_where` work. A
+closure capturing an inverted local receives the space of the reads before it
+in its environment (its first write delivers there), and gives back, when its
+call ends, a space for the reads in it that no write in it satisfied
+(`inv_out`); e.g. `Nat::sub` borrows through one.
 
 ## Status
 
-Last updated 2026-10-15 (`tests/frames.sh`, 84 programs):
+Last updated 2026-10-24 (`tests/frames.sh`, 83 programs):
 
-**28 of 84 pass.** Failing programs per error (a program can count more than
+**65 of 83 pass.** Failing programs per error (a program can count more than
 once):
 
 | Programs | Error                                                                   |
 | -------: | ----------------------------------------------------------------------- |
-|       13 | deadlock (mostly the open question above)                               |
-|       14 | `Nat` literals (12 of them through `Pcg32::canonical`)                  |
-|        6 | hole read more than once                                                |
-|        5 | infinite size (`cons`, `life`, `par`, `regex`, `unary` need a `Box`)    |
-|        5 | inline Ivy (`F64::fork` ×3, `IO::args`, `IO::File::create`)             |
-|        1 | inverted locals (`inverse`)                                             |
-|        1 | a value used before it is computed (`configurable`)                     |
-|        1 | invalid operands to `n32:div` (`div_by_zero`; expected output is IVM's) |
-|        2 | emitter / heap panics (`lambda`, `centimanes`)                          |
+|        4 | deadlock (`array_smoothsort`, `sort`, `par`, `regex`)                    |
+|        2 | inline Ivy (`IO::args`, `IO::File::create`)                             |
+|        1 | an inverted local read several times, of a type which is not plain data (`inverse`) |
+|        1 | infinite size (`life`: its streams are written through spaces)          |
+|        3 | debug mode (`div_by_zero`, `option_party`, `iterator_party`)            |
 
-The remaining failures have wrong output without an error (e.g. `sum_divisors`,
-`mandelbrot`, `named_impls`, `nothing_lasts_forever`) and have not been
-investigated yet.
+The remaining failures have no error: `json` prints wrong output;
+`segmented_sieve`, `lcs`, `mandelbrot_tga`, `f64_roundabout` (40s) and
+`nat_edges` (27s) exceed the timeout, with correct output; and `lambda` hits an emitter panic.
 
 Notes:
 
 - Some expected outputs depend on IVM specifics (backtraces of the removed debug
   call stack, IVM's error messages), so a few programs can only pass once their
   snapshots are adapted.
-- The open question above causes most deadlocks (e.g. forking closures with
-  mutable captures, as in `array_order`).
-- `Nat` literals are not supported (mostly hit through `Pcg32`).
+- Performance: programs which also passed before the dataflow rewrite now run
+  fewer instructions and frames than they did then (e.g. `fib` 88k
+  instructions and 3.4k frames, from 102k and 7.1k; `sieve` 866M, from 1293M).
+  Besides grouping, this comes from discarding values through a null space
+  instead of a frame, skipping calls without inputs or outputs to functions
+  which only move data (e.g. dropping `()`), and inlining constants which are
+  literal words (e.g. `debug::enabled`). The largest remaining costs are calls
+  to small wrappers (e.g. `N32::div`, `Lt::gt`), which are not inlined, and
+  the holes returning values from child stages (`lazy_returns`).
 - Remaining `$ivy` blocks (120 in `root`) are fine when their function is an
   `#[intrinsic]`; others (`F64::fork`, `IO::args`, `IO::File::create`, …) need
   intrinsics.
-- Inverted locals are not supported.
-- `cons`, `life`, `par`, `regex`, `unary` need a `Box` in their recursive types.
+- `cons`, `par`, `regex` and `unary` box their recursive types now; `life`
+  writes its recursive streams through spaces, which a `Box` cannot express.
   Tests relying on erasure are marked `TODO(frames)`.
-- Programs leak objects (the stats line reports them); hello world leaks none.
+- `invalid_extrinsics` was removed: it tested IVM's type checks on extrinsics.
+- A panic (or an invalid operation) only stops the block it occurs in; the
+  runtime runs the other ready work, then reports the first error.
+- Passing programs leak no objects, except `empty_loop` and `log_brute` (as
+  before).
 
 ## Working on it
 
@@ -239,7 +304,14 @@ tests/frames.sh logic      # only names containing "logic"
 Debugging environment variables:
 
 - `FRAMES_DUMP=1`: print the compiled program (units, blocks, instructions).
-- `FRAMES_TRACE=1`: print every block run, with its frame's words.
+- `FRAMES_TRACE=1`: print every block run, with its frame's words; report
+  holes used with the wrong size and writes into objects which are not waiting;
+  on a deadlock or leak, list the frames and holes still waiting (holes with
+  where they were created).
+- `FRAMES_PROFILE=1`: count how often each block runs and how many frames and
+  holes each instruction creates, and print the top ones.
+- `FRAMES_CHECK=1`: report blocks which read registers that are neither loaded
+  from their frame nor written earlier (usually an emitter bug).
 - `FRAMES_DEBUG=1`: add `(stage, step)` to unsupported messages, print stuck
   steps and each unit's entry points.
 - `FRAMES_PANIC=1`: panic at the first unsupported construct (use with a debug

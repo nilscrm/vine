@@ -5,9 +5,9 @@ pub enum* Regex {
   Never(),
   Empty(),
   Atom(Char, Bool),
-  Union(Regex, Regex),
-  Concat(Regex, Regex, Bool, Bool),
-  Repeat(Regex, Bool),
+  Union(Box[Regex], Box[Regex]),
+  Concat(Box[Regex], Box[Regex], Bool, Bool),
+  Repeat(Box[Regex], Bool),
 }
 
 pub mod Regex {
@@ -25,16 +25,16 @@ pub mod Regex {
   }
 
   pub fn .plus(re: Regex) -> Regex {
-    Regex::Repeat(re, false)
+    Regex::Repeat(Box(re), false)
   }
 
   pub fn .star(re: Regex) -> Regex {
-    Regex::Repeat(re, true)
+    Regex::Repeat(Box(re), true)
   }
 
   pub impl : BitOr[Regex, Regex, Regex] {
     fn bit_or(a: Regex, b: Regex) -> Regex {
-      Union(a, b)
+      Union(Box(a), Box(b))
     }
   }
 
@@ -45,7 +45,7 @@ pub mod Regex {
       if !an {
         b.deactivate();
       }
-      Concat(a, b, an, bn)
+      Concat(Box(a), Box(b), an, bn)
     }
   }
 
@@ -54,17 +54,17 @@ pub mod Regex {
       &Never() {}
       &Empty() {}
       &Atom(_, ready) { ready = false }
-      &Union(a, b) {
+      &Union(Box(a), Box(b)) {
         a.deactivate();
         b.deactivate();
       }
-      &Concat(a, b, an, _) {
+      &Concat(Box(a), Box(b), an, _) {
         a.deactivate();
         if an {
           b.deactivate();
         }
       }
-      &Repeat(x, _) { x.deactivate() }
+      &Repeat(Box(x), _) { x.deactivate() }
     }
   }
 
@@ -85,9 +85,9 @@ pub mod Regex {
       &Never() { false }
       &Empty() { true }
       &Atom(_) { false }
-      &Union(a, b) { a.nullable() or b.nullable() }
+      &Union(Box(a), Box(b)) { a.nullable() or b.nullable() }
       &Concat(_, _, an, bn) { an & bn }
-      &Repeat(x, n) { n or x.nullable() }
+      &Repeat(Box(x), n) { n or x.nullable() }
     }
   }
 
@@ -100,13 +100,13 @@ pub mod Regex {
         ready = enter;
         accept
       }
-      &Union(a, b) { a.update(char, enter) | b.update(char, enter) }
-      &Concat(a, b, an, bn) {
+      &Union(Box(a), Box(b)) { a.update(char, enter) | b.update(char, enter) }
+      &Concat(Box(a), Box(b), an, bn) {
         let ac = a.update(char, enter);
         let bc = b.update(char, ac | an & enter);
         bc | bn & ac
       }
-      &Repeat(x, _) {
+      &Repeat(Box(x), _) {
         let loop accept: Bool;
         accept = x.update(char, enter | accept);
         accept
@@ -120,9 +120,9 @@ pub mod Regex {
         Never() { "!" }
         Empty() { "()" }
         Atom(c, _) { "{c}" }
-        Union(a, b) { "({a}|{b})" }
-        Concat(a, b, _, _) { "({a}{b})" }
-        Repeat(x, n) {
+        Union(Box(a), Box(b)) { "({a}|{b})" }
+        Concat(Box(a), Box(b), _, _) { "({a}{b})" }
+        Repeat(Box(x), n) {
           let char = if n { "*" } else { "+" };
           "({x}{char})"
         }
