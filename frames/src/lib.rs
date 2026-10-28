@@ -20,11 +20,12 @@
 //!
 //! A space into frame `0` discards what is written into it.
 //!
-//! A *hole* is a frame whose code is supplied later: its slots receive a
-//! value through spaces, like any other frame, but what happens to the value
-//! is decided by the hole's reader, which supplies the code afterwards; e.g.
-//! forwarding the value into another space. A hole's header counts the code
-//! as one more unfilled slot.
+//! A frame's code may also be supplied after it is created, by whoever reads
+//! it: its words are written through spaces as usual, and the code decides
+//! what is done with them, e.g. writing them into another space. Data which is
+//! not stored inline (boxes, the environments of closures, ...) is held this
+//! way. A frame's header counts its code as one more word still to be written,
+//! until it is supplied.
 //!
 //! Values are stored inline, using as many words as their type's layout
 //! requires; the runtime itself does not know about types or layouts.

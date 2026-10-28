@@ -151,24 +151,19 @@ fn deep_recursion() {
   assert_eq!(live, 0);
 }
 
-/// Creates a hole for a two-word value, whose space is split in two, and
-/// filled in two parts; the hole's value is forwarded into a frame, before,
-/// between, or after the parts are filled.
-fn hole_program(forward_after: usize) -> Program {
+/// Creates a frame without code for two words, whose space is split in two,
+/// and filled in two parts; the frame's code, which prints the words, is
+/// supplied before, between, or after the parts are filled.
+fn late_code_program(code_after: usize) -> Program {
   let mut program = Program::default();
   let done = BlockId(1);
   let fill = |part: u32, char: u8| {
     vec![Const { dst: r(3), value: char as u64 }, Write { space: r(5 + part), src: r(3), len: 1 }]
   };
-  let forward = vec![
-    NewFrame { dst: r(1), block: done },
-    Space { dst: r(2), frame: r(1), offset: 1 },
-    HoleForward { hole: r(0), space: r(2), len: 2 },
-  ];
   let mut parts = vec![fill(0, b'h'), fill(1, b'i')];
-  parts.insert(forward_after, forward);
+  parts.insert(code_after, vec![SetCode { frame: r(0), block: done }]);
   let mut code = vec![
-    HoleNew { dst: r(0), len: 2 },
+    NewFrameWithoutCode { dst: r(0), size: 2 },
     Space { dst: r(4), frame: r(0), offset: 1 },
     Split { space: r(4), offsets: vec![0, 1], dsts: vec![r(5), r(6)] },
   ];
@@ -186,38 +181,64 @@ fn hole_program(forward_after: usize) -> Program {
 }
 
 #[test]
-fn holes() {
-  for forward_after in 0..3 {
-    assert_eq!(run(&hole_program(forward_after)), Ok(("hi".into(), 0)));
+fn late_code() {
+  for code_after in 0..3 {
+    assert_eq!(run(&late_code_program(code_after)), Ok(("hi".into(), 0)));
   }
 }
 
 #[test]
-fn hole_take() {
-  // `HoleTake` fails while the value is missing, and succeeds once it is
-  // filled, or for a hole created with `HoleOf`.
+fn forward() {
+  // A frame without code holding a value, with a word after it for a space;
+  // the code supplied writes the value into the space.
   let mut program = Program::default();
-  let code = vec![
-    HoleNew { dst: r(0), len: 1 },
-    HoleTake { hole: r(0), dst: r(1), len: 1, ok: r(2) },
-    Const { dst: r(9), value: 0 },
-    Const { dst: r(3), value: b'0' as u64 },
-    Op { op: program.op("n32:add"), args: vec![r(2), r(3)], rets: vec![r(4)] },
-    print(r(9), r(4)),
-    Space { dst: r(5), frame: r(0), offset: 1 },
-    Const { dst: r(6), value: b'a' as u64 },
-    Write { space: r(5), src: r(6), len: 1 },
-    HoleTake { hole: r(0), dst: r(1), len: 1, ok: r(2) },
-    print(r(9), r(1)),
-    Const { dst: r(6), value: b'b' as u64 },
-    HoleOf { dst: r(0), src: r(6), len: 1 },
-    HoleTake { hole: r(0), dst: r(1), len: 1, ok: r(2) },
-    print(r(9), r(1)),
-    Halt,
-    End,
-  ];
-  program.entry = add(&mut program, "entry", 0, 10, code);
-  assert_eq!(run(&program), Ok(("0ab".into(), 0)));
+  let done = BlockId(1);
+  let forward = BlockId(2);
+  program.entry = add(
+    &mut program,
+    "entry",
+    0,
+    5,
+    vec![
+      NewFrameWithoutCode { dst: r(0), size: 2 },
+      Const { dst: r(1), value: b'a' as u64 },
+      Fill { frame: r(0), offset: 1, src: r(1), len: 1 },
+      NewFrame { dst: r(2), block: done },
+      Space { dst: r(3), frame: r(2), offset: 1 },
+      Fill { frame: r(0), offset: 2, src: r(3), len: 1 },
+      SetCode { frame: r(0), block: forward },
+      End,
+    ],
+  );
+  _ = add(
+    &mut program,
+    "done",
+    1,
+    2,
+    vec![Const { dst: r(1), value: 0 }, print(r(1), r(0)), Halt, End],
+  );
+  _ = add(&mut program, "forward", 2, 2, vec![Write { space: r(1), src: r(0), len: 1 }, End]);
+  assert_eq!(run(&program), Ok(("a".into(), 0)));
+}
+
+#[test]
+fn code_supplied_twice() {
+  let mut program = Program::default();
+  let done = BlockId(1);
+  program.entry = add(
+    &mut program,
+    "entry",
+    0,
+    1,
+    vec![
+      NewFrameWithoutCode { dst: r(0), size: 1 },
+      SetCode { frame: r(0), block: done },
+      SetCode { frame: r(0), block: done },
+      End,
+    ],
+  );
+  _ = add(&mut program, "done", 1, 1, vec![End]);
+  assert_eq!(run(&program), Err(RuntimeError::CodeSuppliedTwice));
 }
 
 #[test]

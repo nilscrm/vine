@@ -21,9 +21,6 @@ const COUNTER_SHIFT: u32 = 48;
 const CODE_MASK: u64 = (1 << COUNTER_SHIFT) - 1;
 /// The code of a frame whose code has not been supplied yet.
 const CODE_NONE: u64 = CODE_MASK;
-/// The code of a hole whose value is to be forwarded into the space stored
-/// after the value; the low bits hold the value's length.
-const CODE_FORWARD: u64 = 1 << (COUNTER_SHIFT - 1);
 /// The bits of a space holding the offset within the frame.
 const SPACE_OFFSET_BITS: u32 = 16;
 
@@ -36,8 +33,8 @@ pub enum RuntimeError {
   Deadlock {
     waiting: u64,
   },
-  /// A hole was read twice.
-  HoleMisuse,
+  /// A frame's code was supplied twice.
+  CodeSuppliedTwice,
   Io(String),
 }
 
@@ -50,7 +47,7 @@ impl fmt::Display for RuntimeError {
       RuntimeError::Deadlock { waiting } => {
         write!(f, "deadlock: the program stopped with {waiting} objects still live")
       }
-      RuntimeError::HoleMisuse => write!(f, "hole read more than once"),
+      RuntimeError::CodeSuppliedTwice => write!(f, "frame's code supplied more than once"),
       RuntimeError::Io(err) => write!(f, "io error: {err}"),
     }
   }
@@ -63,7 +60,6 @@ pub struct Stats {
   pub blocks_run: u64,
   pub instructions: u64,
   pub frames: u64,
-  pub holes: u64,
   pub time: Duration,
 }
 
@@ -88,20 +84,19 @@ pub struct Runtime<'p, 'h> {
   ready: Vec<Addr>,
   halted: bool,
   scratch: Vec<u64>,
-  /// Whether to print each block as it is run, and the frames and holes still
-  /// waiting if the program deadlocks.
+  /// Whether to print each block as it is run, and the frames still waiting
+  /// if the program deadlocks.
   pub trace: bool,
-  /// Whether to count where frames and holes are created, and which blocks
-  /// run.
+  /// Whether to count where frames are created, and which blocks run.
   pub profile: bool,
   /// With `profile`, the number of objects created at each instruction, and of
   /// runs of each block.
   pub counts: HashMap<(String, usize), u64>,
-  /// With `trace`, the frames and holes which have not run yet.
+  /// With `trace`, the frames which have not run yet.
   waiting: HashSet<Addr>,
-  /// With `trace`, the value sizes of the holes which have not run yet, and
-  /// where they were created.
-  hole_sizes: HashMap<Addr, (u32, String, usize)>,
+  /// With `trace`, the sizes of the frames whose code has not been supplied
+  /// yet, and where they were created.
+  codeless: HashMap<Addr, (u32, String, usize)>,
 }
 
 impl<'p, 'h> Runtime<'p, 'h> {
@@ -128,7 +123,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
       waiting: HashSet::new(),
       profile: false,
       counts: HashMap::new(),
-      hole_sizes: HashMap::new(),
+      codeless: HashMap::new(),
     })
   }
 
@@ -200,17 +195,6 @@ impl<'p, 'h> Runtime<'p, 'h> {
     self.decrement(frame, len);
   }
 
-  fn fill_words(&mut self, frame: Addr, offset: u32, words: &[u64]) {
-    if frame.0 == 0 {
-      return;
-    }
-    if self.trace && !words.is_empty() && !self.waiting.contains(&frame) {
-      eprintln!("trace: write into {} at offset {offset}, which is not waiting", frame.0);
-    }
-    self.heap.slice_mut(frame.offset(offset), words.len() as u32).copy_from_slice(words);
-    self.decrement(frame, words.len() as u32);
-  }
-
   /// Records that `len` more words of `frame` have been written (or that its
   /// code has been supplied, with `len` of `1`).
   fn decrement(&mut self, frame: Addr, len: u32) {
@@ -229,10 +213,6 @@ impl<'p, 'h> Runtime<'p, 'h> {
   fn run_frame(&mut self, frame: Addr) -> Result<(), RuntimeError> {
     let program = self.program;
     let code = self.heap.get(frame) & CODE_MASK;
-    if code & CODE_FORWARD != 0 {
-      self.forward(frame, (code & !CODE_FORWARD) as u32);
-      return Ok(());
-    }
     let block = &program.blocks[BlockId(code as usize)];
     let unit = &program.units[block.unit];
     self.stats.blocks_run += 1;
@@ -256,10 +236,7 @@ impl<'p, 'h> Runtime<'p, 'h> {
     loop {
       self.stats.instructions += 1;
       if self.profile
-        && matches!(
-          unit.code[pc],
-          Instr::NewFrame { .. } | Instr::HoleNew { .. } | Instr::HoleOf { .. }
-        )
+        && matches!(unit.code[pc], Instr::NewFrame { .. } | Instr::NewFrameWithoutCode { .. })
       {
         *self.counts.entry((unit.name.clone(), pc)).or_default() += 1;
       }
@@ -290,18 +267,6 @@ impl<'p, 'h> Runtime<'p, 'h> {
           }
         }
 
-        Instr::Alloc { dst, len } => self.regs[dst.0 as usize] = self.heap.alloc(*len).0,
-        Instr::Free { ptr, len } => self.heap.free(self.addr(*ptr), *len),
-        Instr::Load { dst, ptr, offset, len } => {
-          let words = self.heap.slice(self.addr(*ptr).offset(*offset), *len);
-          self.regs[dst.0 as usize..][..*len as usize].copy_from_slice(words);
-        }
-        Instr::Store { ptr, offset, src, len } => {
-          let addr = self.addr(*ptr).offset(*offset);
-          let src = &self.regs[src.0 as usize..][..*len as usize];
-          self.heap.slice_mut(addr, *len).copy_from_slice(src);
-        }
-
         Instr::NewFrame { dst, block } => self.regs[dst.0 as usize] = self.new_frame(*block).0,
         Instr::Fill { frame, offset, src, len } => {
           self.fill(self.addr(*frame), *offset, *src, *len);
@@ -320,58 +285,27 @@ impl<'p, 'h> Runtime<'p, 'h> {
           }
         }
 
-        Instr::HoleNew { dst, len } => {
-          let hole = self.heap.alloc(hole_size(*len));
-          self.stats.holes += 1;
-          self.heap.set(hole, ((*len as u64 + 1) << COUNTER_SHIFT) | CODE_NONE);
-          self.regs[dst.0 as usize] = hole.0;
+        Instr::NewFrameWithoutCode { dst, size } => {
+          let frame = self.heap.alloc(size + 1);
+          self.stats.frames += 1;
+          self.heap.set(frame, ((*size as u64 + 1) << COUNTER_SHIFT) | CODE_NONE);
+          self.regs[dst.0 as usize] = frame.0;
           if self.trace {
-            self.waiting.insert(hole);
-            self.hole_sizes.insert(hole, (*len, unit.name.clone(), pc));
+            self.waiting.insert(frame);
+            self.codeless.insert(frame, (*size, unit.name.clone(), pc));
           }
         }
-        Instr::HoleOf { dst, src, len } => {
-          let hole = self.heap.alloc(hole_size(*len));
-          self.stats.holes += 1;
-          self.heap.set(hole, (1 << COUNTER_SHIFT) | CODE_NONE);
-          let src = &self.regs[src.0 as usize..][..*len as usize];
-          self.heap.slice_mut(hole.offset(1), *len).copy_from_slice(src);
-          self.regs[dst.0 as usize] = hole.0;
+        Instr::SetCode { frame, block } => {
+          let frame = self.addr(*frame);
           if self.trace {
-            self.waiting.insert(hole);
-            self.hole_sizes.insert(hole, (*len, unit.name.clone(), pc));
+            self.check_code(frame, *block, unit, pc);
           }
-        }
-        Instr::HoleForward { hole, space, len } => {
-          let hole = self.addr(*hole);
-          self.check_hole(hole, *len, unit, pc);
-          let header = self.heap.get(hole);
+          let header = self.heap.get(frame);
           if header & CODE_MASK != CODE_NONE {
-            Err(RuntimeError::HoleMisuse)?
+            Err(RuntimeError::CodeSuppliedTwice)?
           }
-          self.heap.set(hole.offset(len + 1), self.regs[space.0 as usize]);
-          self.heap.set(hole, (header & !CODE_MASK) | CODE_FORWARD | *len as u64);
-          if header >> COUNTER_SHIFT == 1 {
-            self.forward(hole, *len);
-          } else {
-            self.decrement(hole, 1);
-          }
-        }
-        Instr::HoleTake { hole, dst, len, ok } => {
-          let hole = self.addr(*hole);
-          self.check_hole(hole, *len, unit, pc);
-          let header = self.heap.get(hole);
-          if header & CODE_MASK != CODE_NONE {
-            Err(RuntimeError::HoleMisuse)?
-          }
-          let filled = header >> COUNTER_SHIFT == 1;
-          if filled {
-            let words = self.heap.slice(hole.offset(1), *len);
-            self.regs[dst.0 as usize..][..*len as usize].copy_from_slice(words);
-            self.heap.free(hole, hole_size(*len));
-            self.waiting.remove(&hole);
-          }
-          self.regs[ok.0 as usize] = filled as u64;
+          self.heap.set(frame, (header & !CODE_MASK) | block.0 as u64);
+          self.decrement(frame, 1);
         }
 
         Instr::Jump { target } => {
@@ -394,20 +328,24 @@ impl<'p, 'h> Runtime<'p, 'h> {
     }
   }
 
-  /// With `trace`, reports a hole used with the wrong size, or which is not a
-  /// hole.
-  fn check_hole(&self, hole: Addr, len: u32, unit: &Unit, pc: usize) {
-    if self.trace && self.hole_sizes.get(&hole).map(|x| x.0) != Some(len) {
-      let size = self.hole_sizes.get(&hole);
-      eprintln!(
-        "trace: hole {} of size {size:?} used with size {len} in {} at {pc}",
-        hole.0, unit.name
-      );
+  /// With `trace`, reports code supplied to a frame of a different size, or
+  /// to a frame which did not wait for its code.
+  fn check_code(&mut self, frame: Addr, block: BlockId, unit: &Unit, pc: usize) {
+    let size = self.program.blocks[block].frame_size();
+    match self.codeless.remove(&frame) {
+      Some((expected, ..)) if expected == size => {}
+      found => eprintln!(
+        "trace: code b{} of size {size} supplied to frame {} of size {:?} in {} at {pc}",
+        block.0,
+        frame.0,
+        found.map(|x| x.0),
+        unit.name
+      ),
     }
   }
 
-  /// Prints the frames and holes still waiting, with the number of words (or
-  /// code) they are missing.
+  /// Prints the frames still waiting, with the number of words (or code) they
+  /// are missing.
   fn print_waiting(&self) {
     let mut waiting = self.waiting.iter().copied().collect::<Vec<_>>();
     waiting.sort_by_key(|addr| addr.0);
@@ -416,10 +354,11 @@ impl<'p, 'h> Runtime<'p, 'h> {
       let missing = header >> COUNTER_SHIFT;
       let code = header & CODE_MASK;
       if code == CODE_NONE {
-        let (_, unit, pc) = &self.hole_sizes[&addr];
-        eprintln!("waiting: hole at {} (from {unit} at {pc}), missing {missing}", addr.0);
-      } else if code & CODE_FORWARD != 0 {
-        eprintln!("waiting: forwarding hole at {}, missing {missing}", addr.0);
+        let (_, unit, pc) = &self.codeless[&addr];
+        eprintln!(
+          "waiting: frame without code at {} (from {unit} at {pc}), missing {missing}",
+          addr.0
+        );
       } else {
         let block = &self.program.blocks[BlockId(code as usize)];
         let unit = &self.program.units[block.unit].name;
@@ -430,17 +369,6 @@ impl<'p, 'h> Runtime<'p, 'h> {
 
   fn addr(&self, reg: Reg) -> Addr {
     Addr(self.regs[reg.0 as usize])
-  }
-
-  /// Forwards the value of a hole whose value slots have all been filled,
-  /// and frees the hole.
-  fn forward(&mut self, hole: Addr, len: u32) {
-    let words = self.heap.slice(hole.offset(1), len).to_vec();
-    let space = self.heap.get(hole.offset(len + 1));
-    self.heap.free(hole, hole_size(len));
-    self.waiting.remove(&hole);
-    let (frame, offset) = decode_space(space);
-    self.fill_words(frame, offset, &words);
   }
 
   fn io(&mut self, op: IoOp, args: &[u64]) -> Result<Vec<u64>, RuntimeError> {
@@ -487,12 +415,6 @@ fn encode_space(frame: Addr, offset: u32) -> u64 {
 
 fn decode_space(space: u64) -> (Addr, u32) {
   (Addr(space >> SPACE_OFFSET_BITS), (space & ((1 << SPACE_OFFSET_BITS) - 1)) as u32)
-}
-
-/// The size of a hole frame for a value of `len` words: the header, the value,
-/// and the space to forward it to.
-fn hole_size(len: u32) -> u32 {
-  len + 2
 }
 
 /// Reads a single unicode character, returning the number of bytes read, and

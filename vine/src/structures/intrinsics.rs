@@ -112,11 +112,11 @@ intrinsics! {
   BoolLe = "bool:le",
   BoolToN32 = "bool:to_n32",
 
-  HoleNew = "hole:new",
-  HoleOf = "hole:of",
-  HoleGet = "hole:get",
-  HoleForward = "hole:forward",
-  HoleAsRef = "hole:as_ref",
+  FrameNew = "frame:new",
+  FrameOf = "frame:of",
+  FrameGet = "frame:get",
+  FrameForward = "frame:forward",
+  FrameAsRef = "frame:as_ref",
 
   IoPrintChar = "io:print_char",
   IoPrintByte = "io:print_byte",

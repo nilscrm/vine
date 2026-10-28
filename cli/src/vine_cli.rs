@@ -261,11 +261,10 @@ impl VineRunCommand {
       if !self.run_args.no_stats() {
         let stats = &runtime.stats;
         eprintln!(
-          "\nframes: {} blocks, {} instructions, {} frames, {} holes, {} heap words at peak, {} objects leaked, {:?}",
+          "\nframes: {} blocks, {} instructions, {} frames, {} heap words at peak, {} objects leaked, {:?}",
           stats.blocks_run,
           stats.instructions,
           stats.frames,
-          stats.holes,
           runtime.heap.stats.peak_words,
           runtime.heap.live_objects(),
           stats.time,

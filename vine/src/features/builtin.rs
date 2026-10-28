@@ -20,7 +20,7 @@ pub struct Builtins {
   pub nat: Option<StructId>,
   pub char: Option<OpaqueTypeId>,
   pub io: Option<OpaqueTypeId>,
-  pub hole: Option<OpaqueTypeId>,
+  pub frame: Option<OpaqueTypeId>,
 
   pub box_: Option<StructId>,
   pub list: Option<StructId>,
@@ -109,7 +109,7 @@ impl Charter<'_> {
       "Nat" => set(&mut b.nat, struct_id),
       "Char" => set(&mut b.char, opaque_type_id),
       "IO" => set(&mut b.io, opaque_type_id),
-      "Hole" => set(&mut b.hole, opaque_type_id),
+      "Frame" => set(&mut b.frame, opaque_type_id),
       "Box" => set(&mut b.box_, struct_id),
       "List" => set(&mut b.list, struct_id),
       "String" => set(&mut b.string, struct_id),

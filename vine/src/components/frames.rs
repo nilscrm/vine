@@ -47,6 +47,9 @@ pub struct FramesEmitter<'a> {
   queued: HashSet<SpecId>,
   /// Blocks whose frames write a value of a given size into a space.
   write: HashMap<u32, BlockId>,
+  /// Blocks whose frames hold a value of a given size, followed by a space
+  /// which they forward it into.
+  forward: HashMap<u32, BlockId>,
   /// The unit of blocks which are not used.
   dead_unit: Option<UnitId>,
 }
@@ -89,6 +92,7 @@ impl<'a> FramesEmitter<'a> {
       queue: Vec::new(),
       queued: HashSet::new(),
       write: HashMap::new(),
+      forward: HashMap::new(),
       dead_unit: None,
     }
   }
@@ -204,6 +208,24 @@ impl<'a> FramesEmitter<'a> {
       frame: (0..len + 1).map(Reg).collect(),
     });
     self.write.insert(len, block);
+    block
+  }
+
+  /// Returns a block whose frames hold a value of `len` words, followed by a
+  /// space, and write the value into the space. It is the code supplied to a
+  /// frame holding a value to forward the value.
+  pub(crate) fn forward_block(&mut self, len: u32) -> BlockId {
+    if let Some(&block) = self.forward.get(&len) {
+      return block;
+    }
+    let code = vec![Instr::Write { space: Reg(len), src: Reg(0), len }, Instr::End];
+    let unit = self.program.units.push(Unit { name: "forward".into(), regs: len + 1, code });
+    let block = self.program.blocks.push(Block {
+      unit,
+      entry: Label(0),
+      frame: (0..len + 1).map(Reg).collect(),
+    });
+    self.forward.insert(len, block);
     block
   }
 

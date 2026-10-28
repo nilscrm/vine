@@ -200,13 +200,10 @@ impl<'a> Layouter<'a> {
     Ok(layout)
   }
 
-  /// Opaque types are a single word: primitives, or handles to values owned
-  /// by the host, which the runtime treats as plain data. A `Hole` is a
-  /// pointer to a frame.
-  /// A hole is a handle; other opaque types are plain data of their declared
-  /// size.
+  /// A `Frame` is a handle (a pointer to the frame); other opaque types are
+  /// plain data of their declared size.
   fn opaque_layout(&mut self, id: OpaqueTypeId) -> Result<Layout, ErrorGuaranteed> {
-    if Some(id) == self.chart.builtins.hole {
+    if Some(id) == self.chart.builtins.frame {
       return Ok(Layout::HANDLE);
     }
     let opaque = &self.chart.opaque_types[id];

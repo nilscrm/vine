@@ -46,17 +46,24 @@ These were decided together with Nils; don't revisit them without asking.
   spaces needs a small forwarding frame, which is rare.
 - **The frame counter counts words still missing** (plus one if the code has not
   been supplied), not slots. This makes splitting spaces free.
-- **Holes are frames whose code is supplied later.**
-  `Hole::new[T]() -> (Hole[T], ~T)`: the write end is a plain `~T`; the
-  `Hole[T]` read end supplies the code: `.get()`, `.forward(to: ~T)`,
-  `Hole::of(v)`, `.as_ref()`. A hole has exactly one value slot. A hole's value
-  may be read only once.
-- **`List` stays a difference list**: `List(N32, Hole[Stream[T]], ~Stream[T])`,
-  with `Stream = done() | more(T, Hole[Stream[T]])` (an `unsafe enum`, i.e. a
+- **Frames are the only kind of object** (decided 2026-10-28). There is no
+  `malloc` (no `Alloc`/`Load`/`Store`/`Free`) and no separate notion of a
+  hole: data not stored inline is a frame whose code has not been supplied
+  yet, and using it means supplying code that does what is wanted with it
+  (`SetCode`); there is no "take". A frame's counter counts its missing words
+  plus one for the code, so what we used to call a frame is just one whose
+  code is supplied when it is created. A frame holding a value has one more
+  word after the value, for its reader's context (e.g. the space that the
+  standard forwarding code writes the value into).
+  `Frame::new[T]() -> (Frame[T], ~T)`: the write end is a plain `~T`; the
+  `Frame[T]` read end supplies the code: `.get()`, `.forward(to: ~T)`,
+  `Frame::of(v)`, `.as_ref()`. A `Frame[T]`'s code may be supplied only once.
+- **`List` stays a difference list**: `List(N32, Frame[Stream[T]], ~Stream[T])`,
+  with `Stream = done() | more(T, Frame[Stream[T]])` (an `unsafe enum`, i.e. a
   union). A `Vec`-like type may come later.
 - **Explicit `Box[T]`** controls what is heap-allocated vs. stored inline.
   Recursive types without a `Box` are a compile error ("infinite size"), as in
-  Rust. `Box` is not self-dual. Values carry no tags. A box is a hole holding
+  Rust. `Box` is not self-dual. Values carry no tags. A box is a frame holding
   its contents, so boxing and unboxing never wait.
 - **No debug mode on frames**: `debug::enabled` (`#[builtin = "debug_enabled"]`)
   is `false`, both for `if const` branches and for the layout of `if const`
@@ -72,9 +79,10 @@ These were decided together with Nils; don't revisit them without asking.
   question in favour of detaching): a step waits only for its own inputs. A
   step which reads values that are not available yet is emitted into a *task*,
   a small frame of the same unit, and the code emitting it goes on; values whose
-  reader is not known yet are held in holes. Only control flow waits: a branch
+  reader is not known yet are held in frames of their own. Only control flow waits: a branch
   or match on a value that is not available yet, and locals passed to another
-  stage (except those produced after the transfer, which are passed in holes).
+  stage (except those produced after the transfer, which are passed in frames
+  holding them).
   See [Waiting](#waiting). Steps which only wait for values one task computes
   are emitted into that task, and values are written directly into the frames
   of the tasks reading them where possible.
@@ -105,7 +113,7 @@ analyzer (interface wires `(input, barrier, output)` per local), specializer
   `Fork`/`Drop` impls get layout parameters too. Explicit impl arguments skip
   them; `show_generics` hides them.
 - `vine/src/components/layouter.rs`: computes `Layout { size, plain }` (`size`
-  in words). Box, Hole, spaces and closures are one non-plain word; an inverted,
+  in words). Box, Frame, spaces and closures are one non-plain word; an inverted,
   non-self-inverse type is a space; an enum is a tag word plus the largest
   variant; a union is its largest variant; a reference is the value plus a
   space. Reports infinite sizes, and `duplicate`/`erase` on non-plain data.
@@ -123,21 +131,26 @@ analyzer (interface wires `(input, barrier, output)` per local), specializer
 
 ### The runtime
 
-- A *frame* is a header word (`counter << 48 | code`) followed by its words. It
-  runs once all of its words have been written; its words are then loaded into
-  the registers its block names, and it is freed.
+- A *frame* is a header word (`counter << 48 | code`) followed by its words.
+  The counter counts the words still to be written, plus one if the code has
+  not been supplied yet. It runs once all of its words and its code are there;
+  its words are then loaded into the registers its block names, and it is
+  freed. Frames are the only heap objects.
+- `NewFrame` creates a frame with its code; `NewFrameWithoutCode` creates one
+  of a given size whose code is supplied later by `SetCode`, with a block of
+  the same frame size. Supplying code twice is an error.
 - A *space* is `(frame << 16) | offset`. `Write` fills a slot through a space;
   `Split` makes sub-spaces, for free.
 - There are no return values: callees write their result into a return space,
   which usually points into the caller's continuation frame.
-- A *hole* is a frame with `CODE_NONE`. `HoleForward` supplies code that
-  forwards the value into a space (`CODE_FORWARD | len`, with the space stored
-  after the value); `HoleTake` takes the value if it has arrived; `HoleOf` makes
-  a filled hole.
+- The emitter holds a value of `len` words in a frame of `len + 1` words (a
+  *holder*); its reader fills the last word, e.g. with a space, and supplies
+  code, e.g. the shared forwarding block for `len`
+  (`FramesEmitter::forward_block`), which writes the value into the space.
 - A *unit* is code plus a register count; a *block* is
   `(unit, entry label, frame word → register map)`.
 - Errors: `Panic`, `InvalidOp` (e.g. division by zero), `Deadlock` (frames left
-  waiting when nothing is ready), `HoleMisuse` ("hole read more than once").
+  waiting when nothing is ready), `CodeSuppliedTwice`.
 
 ### Emitting a unit
 
@@ -156,10 +169,10 @@ analyzer (interface wires `(input, barrier, output)` per local), specializer
   they create are known.
 - **Final values**: a local read before it is written reads its value at the end
   of the scope (`LocalAtEnd`, and `at_end` write-backs).
-- **Closures** are holes holding their environment: the values of captured
+- **Closures** are frames holding their environment: the values of captured
   locals, and spaces for the final values of the locals they modify. Their call,
-  fork and drop stages are entry points of the unit, which take the environment
-  from the hole (`HoleTake`, or wait for it).
+  fork and drop stages are entry points of the unit, which forward the
+  environment into a continuation frame and wait for it.
 - **Branches on constant booleans** only emit the stage taken.
 - **Unsupported constructs** emit a runtime trap
   (`not yet supported by the
@@ -175,13 +188,14 @@ There are four kinds of values not available yet:
    exists at compile time; writing it just moves registers. It becomes real
    when it escapes (e.g. into a callee's frame), or at a stage boundary; its
    value is then held.
-2. **Held**: the value is held by a hole. Writing it into a space forwards the
-   hole; moving it only changes which registers the hole's words belong in. A
-   hole whose words are used separately is split by a task (`align_holes`).
+2. **Held**: the value is held by a holder. Writing it into a space forwards
+   it; moving it only changes which registers the holder's words belong in. A
+   holder whose words are used separately is split by a task
+   (`align_holders`).
 3. **In a task**: a step which reads values which are not available (an
    operation, building a string or list, an IO call, ...) is emitted by
    `emit_detached` into a task: the main code fills the task's frame with the
-   step's inputs (forwarding holes, or pointing virtual spaces into it), and
+   step's inputs (forwarding holders, or pointing virtual spaces into it), and
    the step's code runs in the task once they have all arrived. Tasks stay
    *open* until the block filling their frames ends (`close_tasks`):
    - Values a step computes stay in its task (`in_task`). A later step whose
@@ -190,7 +204,7 @@ There are four kinds of values not available yet:
      the values they wait for.
    - Where a value computed by a task is used elsewhere, the task writes it
      there: into a callee's frame, another task's frame, or a space
-     (`task_write`); into a hole if it is still used when the task closes
+     (`task_write`); into a holder if it is still used when the task closes
      (`release`).
    - A call's result which a later step of the block reads is written
      directly into the frame of the task that step is emitted into
@@ -208,27 +222,27 @@ There are four kinds of values not available yet:
 
 At a transfer, locals whose values are produced by code after it (read before
 they are written, or borrowed by a reference the target takes), or which came
-into the stage in holes, are passed in holes in fixed registers
+into the stage in holders, are passed in holders in fixed registers
 (`lazy_inputs`), which all transfers into an interface agree on. Locals
-returned from child stages which are only passed on are returned in holes too
+returned from child stages which are only passed on are returned in holders too
 (`lazy_returns`). If a transfer finds a local not available yet which an
 earlier transfer into the same interface (e.g. a loop's entry) decided to pass
 in its registers, it waits for it, and records the local (`Hints`); the unit is
-then emitted again, passing it in a hole. Holes holding values produced by
+then emitted again, passing it in a holder. Holders holding values produced by
 code after them are recorded too wherever they are passed on (into another
 interface, returned from a child stage, or captured by a closure, whose
-environment then holds a hole for the value rather than the value, as it is
-taken at once), so that the stages receiving them know not to wait for them.
+environment then holds a holder for the value rather than the value, as it is
+read at once), so that the stages receiving them know not to wait for them.
 Hints only grow between emissions (at most `MAX_ATTEMPTS`).
 
 **Detached branches**: a branch or match on a value which code after it
 produces (written through a virtual space, computed by a task waiting for such
-values, or held by a hole such code fills, e.g. a `lazy_inputs` hole a `Hints`
-entry asked for; see `future` and `future_holes`) does not wait. The branch and
+values, or held by a holder such code fills, e.g. a `lazy_inputs` holder a
+`Hints` entry asked for; see `future` and `future_holders`) does not wait. The branch and
 the chain of stages
 it starts run in a frame of their own (`detach`), entered at the branch, which
 receives the data and the locals the chain uses, and writes the locals it
-returns into holes; control goes on after the chain right away. E.g. in a loop,
+returns into holders; control goes on after the chain right away. E.g. in a loop,
 the next iteration starts before the branch of this one is decided, and fills
 it in later. Stages reached from a detached branch are emitted again for it
 (`Mode`), ending by writing the returned locals (`end_detached`) rather than
@@ -249,7 +263,7 @@ call ends, a space for the reads in it that no write in it satisfied
 
 ## Status
 
-Last updated 2026-10-24 (`tests/frames.sh`, 83 programs):
+Last updated 2026-10-28 (`tests/frames.sh`, 83 programs):
 
 **65 of 83 pass.** Failing programs per error (a program can count more than
 once):
@@ -274,12 +288,19 @@ Notes:
 - Performance: programs which also passed before the dataflow rewrite now run
   fewer instructions and frames than they did then (e.g. `fib` 88k
   instructions and 3.4k frames, from 102k and 7.1k; `sieve` 866M, from 1293M).
+  Making frames the only objects (2026-10-28) left the number of objects the
+  same (`fib`: 7.2k frames, formerly 3.4k frames and 3.8k holes), but
+  forwarding a held value now runs a block (`forward_block`), so twice as many
+  blocks run and 16% more instructions; it is still about 10% faster
+  (`sieve` 12.7s → 11.2s, `stream_primes` 17.4s → 15.1s). Closures' stages
+  always wait for their environment now; that added under 1% objects (e.g.
+  `map_test`).
   Besides grouping, this comes from discarding values through a null space
   instead of a frame, skipping calls without inputs or outputs to functions
   which only move data (e.g. dropping `()`), and inlining constants which are
   literal words (e.g. `debug::enabled`). The largest remaining costs are calls
   to small wrappers (e.g. `N32::div`, `Lt::gt`), which are not inlined, and
-  the holes returning values from child stages (`lazy_returns`).
+  the holders returning values from child stages (`lazy_returns`).
 - Remaining `$ivy` blocks (120 in `root`) are fine when their function is an
   `#[intrinsic]`; others (`F64::fork`, `IO::args`, `IO::File::create`, …) need
   intrinsics.
@@ -305,11 +326,11 @@ Debugging environment variables:
 
 - `FRAMES_DUMP=1`: print the compiled program (units, blocks, instructions).
 - `FRAMES_TRACE=1`: print every block run, with its frame's words; report
-  holes used with the wrong size and writes into objects which are not waiting;
-  on a deadlock or leak, list the frames and holes still waiting (holes with
-  where they were created).
-- `FRAMES_PROFILE=1`: count how often each block runs and how many frames and
-  holes each instruction creates, and print the top ones.
+  code supplied to frames of a different size and writes into frames which
+  are not waiting; on a deadlock or leak, list the frames still waiting
+  (frames without code with where they were created).
+- `FRAMES_PROFILE=1`: count how often each block runs and how many frames
+  each instruction creates, and print the top ones.
 - `FRAMES_CHECK=1`: report blocks which read registers that are neither loaded
   from their frame nor written earlier (usually an emitter bug).
 - `FRAMES_DEBUG=1`: add `(stage, step)` to unsupported messages, print stuck

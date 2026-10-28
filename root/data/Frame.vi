@@ -1,0 +1,54 @@
+
+use util::transmute;
+
+/// A value of type `T` held in a frame of its own, which may not have arrived
+/// yet; it is supplied through the space returned alongside it by
+/// `Frame::new`. What is done with the value is decided by the code its reader
+/// supplies to the frame (e.g. `.get()` or `.forward(to)`).
+/// ```vi
+/// let (frame, space) = Frame::new[N32]();
+/// ~space = 46;
+/// frame.get() // 46
+/// ```
+#[builtin = "Frame"]
+pub type Frame[T];
+
+pub mod Frame {
+  /// Creates a new frame, returning it and the space through which its value
+  /// is supplied.
+  #[intrinsic = "frame:new"]
+  pub fn new[T]() -> (Frame[T], ~T) {
+    let loop value;
+    (safe transmute(value), ~value)
+  }
+
+  /// Creates a frame whose value has already been supplied.
+  #[intrinsic = "frame:of"]
+  pub fn of[T](value: T) -> Frame[T] {
+    safe transmute(value)
+  }
+
+  /// Returns the frame's value, waiting for it to be supplied if necessary.
+  #[intrinsic = "frame:get"]
+  pub fn .get[T](self: Frame[T]) -> T {
+    safe transmute(self)
+  }
+
+  /// Passes the frame's value on to `to`, once it is supplied.
+  #[intrinsic = "frame:forward"]
+  pub fn .forward[T](self: Frame[T], to: ~T) {
+    ~to = self.get();
+  }
+
+  /// Borrows the frame's value, waiting for it to be supplied if necessary.
+  #[intrinsic = "frame:as_ref"]
+  pub fn .as_ref[T](&self: &Frame[T]) -> &T {
+    safe transmute[&Frame[T], &T](&self)
+  }
+
+  pub impl drop[T?]: Drop[Frame[T]] {
+    fn drop(self: Frame[T]) {
+      _ = self.get();
+    }
+  }
+}

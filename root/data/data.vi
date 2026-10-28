@@ -11,6 +11,6 @@ pub mod Set;
 
 pub mod Heap;
 
-pub mod Hole;
+pub mod Frame;
 
 pub mod Iterator;
