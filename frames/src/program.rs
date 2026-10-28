@@ -116,35 +116,25 @@ pub enum Instr {
     rets: Vec<Reg>,
   },
 
-  /// Allocates a heap object of `len` words.
-  Alloc {
-    dst: Reg,
-    len: u32,
-  },
-  /// Frees a heap object of `len` words, without freeing its contents.
-  Free {
-    ptr: Reg,
-    len: u32,
-  },
-  /// Loads `len` words from a heap object.
-  Load {
-    dst: Reg,
-    ptr: Reg,
-    offset: u32,
-    len: u32,
-  },
-  /// Stores `len` words into a heap object.
-  Store {
-    ptr: Reg,
-    offset: u32,
-    src: Reg,
-    len: u32,
-  },
-
   /// Allocates a frame for `block`; none of its words are filled. A frame of
   /// size zero is ready immediately.
   NewFrame {
     dst: Reg,
+    block: BlockId,
+  },
+  /// Allocates a frame of `size` words whose code is supplied later, by
+  /// [`SetCode`](Instr::SetCode); none of its words are filled. The frame
+  /// waits for its code like for one more word.
+  NewFrameWithoutCode {
+    dst: Reg,
+    size: u32,
+  },
+  /// Supplies the code of a frame allocated by
+  /// [`NewFrameWithoutCode`](Instr::NewFrameWithoutCode); `block`'s frame
+  /// size must be the frame's size. The frame runs `block` once all of its
+  /// words have been written, which may already be the case.
+  SetCode {
+    frame: Reg,
     block: BlockId,
   },
   /// Fills the slot of `frame` at `offset` with `len` words.
@@ -174,34 +164,6 @@ pub enum Instr {
     space: Reg,
     offsets: Vec<u32>,
     dsts: Vec<Reg>,
-  },
-
-  /// Allocates a hole for a value of `len` words: a frame whose code has not
-  /// been supplied yet, with the value at offset `1`.
-  HoleNew {
-    dst: Reg,
-    len: u32,
-  },
-  /// Allocates a hole whose value has already been filled.
-  HoleOf {
-    dst: Reg,
-    src: Reg,
-    len: u32,
-  },
-  /// Supplies a hole's code: once its value has been filled, the value is
-  /// written into `space`, and the hole is freed.
-  HoleForward {
-    hole: Reg,
-    space: Reg,
-    len: u32,
-  },
-  /// If a hole's value has been filled, moves it into `dst`, frees the hole,
-  /// and sets `ok` to `1`; otherwise, sets `ok` to `0`.
-  HoleTake {
-    hole: Reg,
-    dst: Reg,
-    len: u32,
-    ok: Reg,
   },
 
   Jump {
@@ -266,13 +228,8 @@ impl Instr {
       Instr::Const { dst, .. } => (vec![], vec![*dst]),
       Instr::Move { dst, src, len } => (range(*src, *len).collect(), range(*dst, *len).collect()),
       Instr::Op { args, rets, .. } | Instr::Io { args, rets, .. } => (args.clone(), rets.clone()),
-      Instr::Alloc { dst, .. } => (vec![], vec![*dst]),
-      Instr::Free { ptr, .. } => (vec![*ptr], vec![]),
-      Instr::Load { dst, ptr, len, .. } => (vec![*ptr], range(*dst, *len).collect()),
-      Instr::Store { ptr, src, len, .. } => {
-        ([*ptr].into_iter().chain(range(*src, *len)).collect(), vec![])
-      }
-      Instr::NewFrame { dst, .. } => (vec![], vec![*dst]),
+      Instr::NewFrame { dst, .. } | Instr::NewFrameWithoutCode { dst, .. } => (vec![], vec![*dst]),
+      Instr::SetCode { frame, .. } => (vec![*frame], vec![]),
       Instr::Fill { frame, src, len, .. } => {
         ([*frame].into_iter().chain(range(*src, *len)).collect(), vec![])
       }
@@ -281,12 +238,6 @@ impl Instr {
         ([*space].into_iter().chain(range(*src, *len)).collect(), vec![])
       }
       Instr::Split { space, dsts, .. } => (vec![*space], dsts.clone()),
-      Instr::HoleNew { dst, .. } => (vec![], vec![*dst]),
-      Instr::HoleOf { dst, src, len } => (range(*src, *len).collect(), vec![*dst]),
-      Instr::HoleForward { hole, space, .. } => (vec![*hole, *space], vec![]),
-      Instr::HoleTake { hole, dst, len, ok } => {
-        (vec![*hole], range(*dst, *len).chain([*ok]).collect())
-      }
       Instr::Branch { cond, .. } => (vec![*cond], vec![]),
       Instr::Switch { tag, .. } => (vec![*tag], vec![]),
       Instr::Jump { .. } | Instr::End | Instr::Halt | Instr::Panic { .. } => (vec![], vec![]),

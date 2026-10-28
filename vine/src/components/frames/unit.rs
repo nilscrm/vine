@@ -8,14 +8,16 @@
 //! connection. A writer either produces the value in registers, or, if it can
 //! only deliver the value later (e.g. a call's result), it asks for a *space*
 //! to write it into: if the reader forwards the value into a space itself, the
-//! writer gets that space; otherwise, the value is *held* by a hole.
+//! writer gets that space; otherwise, the value is *held* by a frame of its
+//! own, a *holder*, whose code the value's reader supplies once it is known
+//! (e.g. code forwarding the value into a space).
 //!
 //! # Waiting
 //!
 //! Code is emitted in program order, but only waits where the data requires
-//! it. A value which is not available yet is held by a hole: writing it into a
-//! space forwards the hole, and moving it only changes which registers it
-//! belongs in. A step which reads such values (e.g. an operation, or building a
+//! it. A value which is not available yet is held by a holder: writing it into
+//! a space forwards it, and moving it only changes which registers it belongs
+//! in. A step which reads such values (e.g. an operation, or building a
 //! string) is emitted into a *task* of its own: a frame of this unit which
 //! receives the values the step reads, and spaces for the values it writes, and
 //! runs the step once they have all arrived (see `emit_detached`). The code
@@ -28,7 +30,7 @@
 //! ends, and execution resumes at a new entry point once the frame is ready.
 //! Locals whose values are produced by code after the transfer (e.g. which are
 //! borrowed by a reference the target takes, or whose final value is read) are
-//! passed in holes instead (`lazy_inputs`).
+//! passed in holders instead (`lazy_inputs`).
 //!
 //! # Control flow
 //!
@@ -168,7 +170,7 @@ struct Flow {
   virtual_spaces: HashMap<Reg, Vec<Reg>>,
   unwritten: HashMap<Reg, (Reg, usize)>,
   held: HashMap<Reg, (Reg, usize)>,
-  holes: HashMap<Reg, Vec<Reg>>,
+  holders: HashMap<Reg, Vec<Reg>>,
   in_task: HashMap<Reg, (usize, Reg)>,
   temps: Vec<(Reg, u32)>,
 }
@@ -200,7 +202,7 @@ enum Fixup {
 /// `detach`).
 type Mode = Option<ReturnPoint>;
 
-/// Locals which re-emitting a unit should pass in holes, as some transfers
+/// Locals which re-emitting a unit should pass in holders, as some transfers
 /// found them not available yet.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct Hints {
@@ -244,10 +246,10 @@ pub(super) fn emit_unit(
   let unit = e.program.units.push(Unit { name: fragment.path.clone(), regs: 0, code: vec![] });
   let Ok(params) = e.type_param_terms(spec_id, fragment.generics) else { return (unit, vec![]) };
   // A unit is emitted again if some transfers found locals not available yet
-  // which they could not pass in holes, as earlier transfers into the same
-  // interface decided otherwise, or passed holes holding values produced later
+  // which they could not pass in holders, as earlier transfers into the same
+  // interface decided otherwise, or passed holders holding values produced later
   // which the stages receiving them did not know of. Hints only grow, as
-  // knowing of one such hole can reveal others; at most a few times.
+  // knowing of one such holder can reveal others; at most a few times.
   let mut hints = Hints::default();
   let mut attempt = 0;
   loop {
@@ -256,7 +258,7 @@ pub(super) fn emit_unit(
       emit_unit_with(e, spec_id, fragment, vir, params.clone(), unit, hints.clone());
     attempt += 1;
     if env::var("FRAMES_DEBUG").is_ok() && wanted != Hints::default() {
-      eprintln!("{}: attempt {attempt}, holes wanted for {wanted:?}", fragment.path);
+      eprintln!("{}: attempt {attempt}, holders wanted for {wanted:?}", fragment.path);
     }
     let mut merged = hints.clone();
     merged.merge(wanted);
@@ -309,7 +311,7 @@ fn emit_unit_with<'a>(
     virtual_spaces: HashMap::new(),
     unwritten: HashMap::new(),
     held: HashMap::new(),
-    holes: HashMap::new(),
+    holders: HashMap::new(),
     lazy_returns: HashMap::new(),
     lazy_inputs: HashMap::new(),
     lazy_locals: Vec::new(),
@@ -317,7 +319,7 @@ fn emit_unit_with<'a>(
     tasks: Vec::new(),
     open_tasks: Vec::new(),
     in_task: HashMap::new(),
-    future_holes: HashSet::new(),
+    future_holders: HashSet::new(),
     reader_tasks: HashMap::new(),
     inv_spaces: HashMap::new(),
     inv_pending: HashMap::new(),
@@ -376,19 +378,19 @@ struct UnitBuilder<'e, 'a> {
   /// Registers that will be written through a virtual space; the space, and
   /// the index of the word.
   unwritten: HashMap<Reg, (Reg, usize)>,
-  /// Registers whose values are held by a hole; the register holding the
-  /// hole, and the index of the word.
+  /// Registers whose values are held by a holder; the register holding the
+  /// holder, and the index of the word.
   held: HashMap<Reg, (Reg, usize)>,
-  /// Registers holding holes, and the registers their words belong in.
-  holes: HashMap<Reg, Vec<Reg>>,
+  /// Registers holding holders, and the registers their words belong in.
+  holders: HashMap<Reg, Vec<Reg>>,
   /// For each point a child stage returns to, the locals it returns which are
-  /// only passed on there, and the registers of the holes returning them; the
+  /// only passed on there, and the registers of the holders returning them; the
   /// code after the return point is shared by every path returning to it.
   lazy_returns: HashMap<(ReturnPoint, Mode), Vec<(Local, Reg)>>,
-  /// For each interface, the locals passed to it in holes, and the registers
-  /// of the holes; all transfers into an interface agree on these.
+  /// For each interface, the locals passed to it in holders, and the registers
+  /// of the holders; all transfers into an interface agree on these.
   lazy_inputs: HashMap<InterfaceId, Vec<(Local, Reg)>>,
-  /// The locals which were passed to the current stage in holes.
+  /// The locals which were passed to the current stage in holders.
   lazy_locals: Vec<Local>,
   /// Registers read by the current step, which must be preserved if it
   /// suspends.
@@ -401,8 +403,8 @@ struct UnitBuilder<'e, 'a> {
   /// Registers whose values are computed by an open task: the task, and the
   /// task's register holding the value.
   in_task: HashMap<Reg, (usize, Reg)>,
-  /// Holes whose values come from code after them (see `future`).
-  future_holes: HashSet<Reg>,
+  /// Holders whose values come from code after them (see `future`).
+  future_holders: HashSet<Reg>,
   /// Open tasks created for steps which will read values written into them,
   /// by the index of the step.
   reader_tasks: HashMap<usize, usize>,
@@ -444,9 +446,9 @@ struct UnitBuilder<'e, 'a> {
   detach_spaces: Vec<(Local, Reg)>,
   /// The registers holding those spaces, by return point and local.
   detach_regs: HashMap<(ReturnPoint, Local), Reg>,
-  /// The locals to pass in holes, as found by an earlier emission.
+  /// The locals to pass in holders, as found by an earlier emission.
   hints: Hints,
-  /// The locals to pass in holes, as found by this emission.
+  /// The locals to pass in holders, as found by this emission.
   wanted: Hints,
 }
 
@@ -549,7 +551,7 @@ impl UnitBuilder<'_, '_> {
     self.virtual_spaces.clear();
     self.unwritten.clear();
     self.held.clear();
-    self.holes.clear();
+    self.holders.clear();
     self.temps.clear();
     debug_assert!(self.open_tasks.is_empty());
     self.in_task.clear();
@@ -565,11 +567,11 @@ impl UnitBuilder<'_, '_> {
     }
     self.lazy_locals.clear();
     let hinted = self.hints.inputs.get(&stage.interface).cloned().unwrap_or_default();
-    for (local, hole) in self.lazy_inputs.get(&stage.interface).cloned().unwrap_or_default() {
+    for (local, holder) in self.lazy_inputs.get(&stage.interface).cloned().unwrap_or_default() {
       let (reg, len) = self.local_regs(local);
-      self.hold_regs(hole, (0..len).map(|i| reg.offset(i)).collect());
+      self.hold_regs(holder, (0..len).map(|i| reg.offset(i)).collect());
       if hinted.contains(&local) {
-        self.future_holes.insert(hole);
+        self.future_holders.insert(holder);
       }
       self.locals[local] = LocalState::Valid;
       self.lazy_locals.push(local);
@@ -786,17 +788,17 @@ impl UnitBuilder<'_, '_> {
           }
           match lazy.iter().find(|&&(l, _)| l == local) {
             Some(&(_, canonical)) if len != 0 => {
-              let hole = self.hole_holding(reg, len);
-              self.temps.push((hole, 1));
-              moves.push((canonical, hole));
+              let holder = self.holder_for(reg, len);
+              self.temps.push((holder, 1));
+              moves.push((canonical, holder));
             }
             _ => self.resolve(reg, len),
           }
         }
         self.merge_inverted();
         self.suspend();
-        for (canonical, hole) in moves {
-          self.code.push(Instr::Move { dst: canonical, src: hole, len: 1 });
+        for (canonical, holder) in moves {
+          self.code.push(Instr::Move { dst: canonical, src: holder, len: 1 });
         }
         self.fixups.push((self.code.len(), 0, Fixup::Return(point, self.mode)));
         self.code.push(Instr::Jump { target: Label(0) });
@@ -905,8 +907,8 @@ impl UnitBuilder<'_, '_> {
     let (local, action) = self.at_end[index];
     if let Some(local) = self.final_local(local) {
       match (action, self.locals[local]) {
-        (AtEnd::Forward(hole, len), _) => {
-          // The local's final value is a space, which the hole's value is
+        (AtEnd::Forward(holder, len), _) => {
+          // The local's final value is a space, which the holder's value is
           // forwarded into.
           let (space, _) = self.local_value(local);
           self.locals[local] = LocalState::Empty;
@@ -915,12 +917,13 @@ impl UnitBuilder<'_, '_> {
             // it once it is.
             let mut task = self.new_task();
             let space = self.task_input(&mut task, space, 1);
-            let hole = self.task_input(&mut task, hole, 1);
-            task.code.push(Instr::HoleForward { hole, space, len });
+            let holder = self.task_input(&mut task, holder, 1);
+            let forward = self.forward(holder, space, len);
+            task.code.extend(forward);
             self.finish_task(task);
           } else {
             self.materialize(space);
-            self.code.push(Instr::HoleForward { hole, space, len });
+            self.emit_forward(holder, space, len);
           }
         }
         (AtEnd::Write(space), _) => {
@@ -1159,8 +1162,8 @@ impl UnitBuilder<'_, '_> {
       [space] => {
         // The value comes from later code.
         if self.virtual_spaces.contains_key(&space) {
-          let hole = self.hold(space);
-          self.future_holes.insert(hole);
+          let holder = self.hold(space);
+          self.future_holders.insert(holder);
         }
         space
       }
@@ -1259,13 +1262,13 @@ impl UnitBuilder<'_, '_> {
       // when the current scope ends.
       if !info.writer {
         // The local holds a space, which the wire's value is written into;
-        // the value is held in a hole until then.
-        let hole = self.alloc(1);
-        self.code.push(Instr::HoleNew { dst: hole, len: info.layout.size });
+        // the value is held in a holder until then.
+        let holder = self.alloc(1);
+        self.code.push(Instr::NewFrameWithoutCode { dst: holder, size: info.layout.size + 1 });
         let space = self.alloc(1);
-        self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
+        self.code.push(Instr::Space { dst: space, frame: holder, offset: 1 });
         self.wire_reader_space(port, space);
-        self.at_end.push((local, AtEnd::Forward(hole, info.layout.size)));
+        self.at_end.push((local, AtEnd::Forward(holder, info.layout.size)));
       } else if let Some(key) = info.key {
         self.set_wire(key, WireState::LocalAtEnd(local));
       }
@@ -1357,7 +1360,7 @@ impl UnitBuilder<'_, '_> {
         }
         match self.vir.locals[local].drop {
           Some(rel) => self.call_rel(Span::NONE, rel, vec![CallArg::Regs(reg, len)], None),
-          // Holes holding the value are still read, to free them.
+          // Frames holding the value are still read, to free them.
           None => self.discard_held(reg, len),
         }
       }
@@ -1483,9 +1486,9 @@ impl UnitBuilder<'_, '_> {
     // Locals whose values are produced by code after this transfer (e.g. a
     // local whose final value is read before it is written, or which is
     // borrowed by a reference the target takes), or which were passed to this
-    // stage in holes, are passed in holes, so that only the code which reads
+    // stage in holders, are passed in holders, so that only the code which reads
     // them waits for them. Other locals are waited for here. All transfers into
-    // an interface agree on which locals are passed in holes.
+    // an interface agree on which locals are passed in holders.
     let lazy = match self.lazy_inputs.get(&transfer.interface) {
       Some(lazy) => lazy.clone(),
       None => {
@@ -1520,25 +1523,25 @@ impl UnitBuilder<'_, '_> {
       }
     }
     for &(local, canonical) in &lazy {
-      let hole = if self.locals[local] == LocalState::Empty {
+      let holder = if self.locals[local] == LocalState::Empty {
         // Its value once the current scope ends.
         let (_, len) = self.local_regs(local);
-        let hole = self.alloc(1);
-        self.code.push(Instr::HoleNew { dst: hole, len });
+        let holder = self.alloc(1);
+        self.code.push(Instr::NewFrameWithoutCode { dst: holder, size: len + 1 });
         let space = self.alloc(1);
-        self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
+        self.code.push(Instr::Space { dst: space, frame: holder, offset: 1 });
         self.at_end.push((local, AtEnd::Write(space)));
-        hole
+        holder
       } else {
         let (reg, len) = self.local_value(local);
-        // Keep the hole known to hold a value produced later.
+        // Keep the holder known to hold a value produced later.
         if self.future(reg, len) {
           self.wanted.inputs.entry(transfer.interface).or_default().insert(local);
         }
         self.locals[local] = LocalState::Empty;
-        self.hole_holding(reg, len)
+        self.holder_for(reg, len)
       };
-      self.code.push(Instr::Move { dst: canonical, src: hole, len: 1 });
+      self.code.push(Instr::Move { dst: canonical, src: holder, len: 1 });
       self.temps.push((canonical, 1));
     }
 
@@ -1549,7 +1552,7 @@ impl UnitBuilder<'_, '_> {
     // Pass the locals the target needs; they are kept in their registers.
     // Holds and virtual spaces only exist while the current stage is emitted,
     // so they are resolved and made real. A later emission passes those which
-    // are not available yet in holes.
+    // are not available yet in holders.
     for (&local, &(input, _, _)) in &interface.wires {
       if input && self.locals[local] != LocalState::Empty && !self.vir.locals[local].inv.0 {
         self.note_waited_input(transfer.interface, local);
@@ -1597,7 +1600,7 @@ impl UnitBuilder<'_, '_> {
         outer.push(self.local_regs(local));
       }
       outer.extend(kept.iter().map(|&(_, copy, len)| (copy, len)));
-      // Held registers are preserved by preserving their holes.
+      // Held registers are preserved by preserving their holders.
       let outer = self.live_regs(outer);
       Context {
         outer,
@@ -1678,7 +1681,7 @@ impl UnitBuilder<'_, '_> {
           self.locals[local] = LocalState::Empty;
         }
       }
-      // Returned locals which are only passed on are returned in holes.
+      // Returned locals which are only passed on are returned in holders.
       let mut lazy = Vec::new();
       let hinted = self.hints.returns.get(&point).cloned().unwrap_or_default();
       for (&local, &(_, _, output)) in &interface.wires {
@@ -1688,12 +1691,12 @@ impl UnitBuilder<'_, '_> {
         if output && (self.local_passed_on(index, local) || hinted.contains(&local)) {
           let (reg, len) = self.local_regs(local);
           if len != 0 {
-            let hole = self.alloc(1);
-            self.hold_regs(hole, (0..len).map(|i| reg.offset(i)).collect());
+            let holder = self.alloc(1);
+            self.hold_regs(holder, (0..len).map(|i| reg.offset(i)).collect());
             if hinted.contains(&local) {
-              self.future_holes.insert(hole);
+              self.future_holders.insert(holder);
             }
-            lazy.push((local, hole));
+            lazy.push((local, holder));
           }
         }
       }
@@ -1709,7 +1712,7 @@ impl UnitBuilder<'_, '_> {
   }
 
   /// Records that a local passed to an interface was waited for, if it was not
-  /// available, so that a later emission passes it in a hole.
+  /// available, so that a later emission passes it in a holder.
   fn note_waited_input(&mut self, interface: InterfaceId, local: Local) {
     if self.vir.locals[local].inv.0 || self.locals[local] != LocalState::Valid {
       return;
@@ -1760,14 +1763,14 @@ impl UnitBuilder<'_, '_> {
     (0..len).map(|i| reg.offset(i)).any(|r| {
       self.unwritten.contains_key(&r)
         || self.in_task.get(&r).is_some_and(|&(task, _)| self.open_tasks[task].future)
-        || self.held.get(&r).is_some_and(|(hole, _)| self.future_holes.contains(hole))
+        || self.held.get(&r).is_some_and(|(holder, _)| self.future_holders.contains(holder))
     })
   }
 
   /// Detaches a branch or match on a value which is not available yet: the
   /// branch and the chain of stages it starts are run by a frame of their own,
   /// which receives the data and the locals they use, and writes the locals
-  /// they return into holes. Control goes on after the chain right away; e.g.
+  /// they return into holders. Control goes on after the chain right away; e.g.
   /// the next iteration of a loop starts before the branch of this one is
   /// decided.
   fn detach(
@@ -1820,8 +1823,8 @@ impl UnitBuilder<'_, '_> {
     let offset = task.offset();
     self.emit_fill(task.frame, offset, data, data_len);
     task.map.extend((0..data_len).map(|i| data_reg.offset(i)));
-    // The locals the chain uses, in their registers; holes for those passed
-    // in holes.
+    // The locals the chain uses, in their registers; holders for those passed
+    // in holders.
     for &(_, canonical) in lazy {
       let offset = task.offset();
       self.emit_fill(task.frame, offset, canonical, 1);
@@ -1866,12 +1869,12 @@ impl UnitBuilder<'_, '_> {
       let space = match self.detach_spaces.iter().find(|&&(l, _)| l == local) {
         Some(&(_, space)) if self.mode == Some(point) => space,
         _ => {
-          let hole = self.alloc(1);
-          self.code.push(Instr::HoleNew { dst: hole, len });
+          let holder = self.alloc(1);
+          self.code.push(Instr::NewFrameWithoutCode { dst: holder, size: len + 1 });
           let space = self.alloc(1);
-          self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
-          self.hold_regs(hole, (0..len).map(|i| reg.offset(i)).collect());
-          self.future_holes.insert(hole);
+          self.code.push(Instr::Space { dst: space, frame: holder, offset: 1 });
+          self.hold_regs(holder, (0..len).map(|i| reg.offset(i)).collect());
+          self.future_holders.insert(holder);
           self.locals[local] = LocalState::Valid;
           space
         }
@@ -2035,7 +2038,7 @@ impl UnitBuilder<'_, '_> {
   // Closures
 
   /// The words of the environment of a closure: for each local the closure's
-  /// stages take as input, its value (or a hole holding it, if it may be
+  /// stages take as input, its value (or a holder holding it, if it may be
   /// produced by code after the closure; see `Hints`); for each local they
   /// output, a space for its final value.
   fn closure_env(&mut self, interface: InterfaceId) -> Vec<(Local, EnvWords)> {
@@ -2063,7 +2066,7 @@ impl UnitBuilder<'_, '_> {
     env
   }
 
-  /// Creates a closure: a hole holding its environment.
+  /// Creates a closure: a holder holding its environment.
   fn emit_closure(&mut self, index: usize, transfer: &Transfer) {
     let interface = &self.vir.interfaces[transfer.interface];
     let env = self.closure_env(transfer.interface);
@@ -2108,11 +2111,11 @@ impl UnitBuilder<'_, '_> {
                 (reg, len)
               };
               if let EnvWords::Held = words {
-                let hole = self.hole_holding(value, len);
-                self.move_regs(dst, hole, 1);
+                let holder = self.holder_for(value, len);
+                self.move_regs(dst, holder, 1);
               } else {
                 // The closure's environment is taken at once; a value produced
-                // later is passed in a hole by the next emission.
+                // later is passed in a holder by the next emission.
                 if self.future(value, len) {
                   self.wanted.inputs.entry(transfer.interface).or_default().insert(local);
                 }
@@ -2122,12 +2125,12 @@ impl UnitBuilder<'_, '_> {
           }
           EnvWords::Space => {
             // The local's final value is written back by the closure, into a
-            // hole.
+            // holder.
             let (reg, len) = self.local_regs(local);
             let space = self.pending_space(reg, len);
-            let hole = self.hold(space);
+            let holder = self.hold(space);
             if inverted {
-              self.future_holes.insert(hole);
+              self.future_holders.insert(holder);
             }
             self.move_regs(dst, space, 1);
             self.locals[local] = LocalState::Valid;
@@ -2135,9 +2138,9 @@ impl UnitBuilder<'_, '_> {
         }
         offset += words.len();
       }
-      // Values which are not available yet are forwarded into the hole once
+      // Values which are not available yet are forwarded into the holder once
       // they are.
-      self.code.push(Instr::HoleNew { dst: closure, len: size });
+      self.code.push(Instr::NewFrameWithoutCode { dst: closure, size: size + 1 });
       let space = self.alloc(1);
       self.code.push(Instr::Space { dst: space, frame: closure, offset: 1 });
       self.temps.push((closure, 1));
@@ -2160,18 +2163,12 @@ impl UnitBuilder<'_, '_> {
     for &(local, _) in &env {
       self.locals[local] = LocalState::Empty;
     }
+    // The environment is forwarded into the continuation frame.
     let regs = self.alloc(size);
-    let ok = self.alloc(1);
-    self.code.push(Instr::HoleTake { hole: closure, dst: regs, len: size, ok });
-    let branch = self.code.len();
-    self.code.push(Instr::Branch { cond: ok, then: Label(0), else_: Label(branch as u32 + 1) });
-    // The environment is not complete yet; wait for it.
     let space = self.pending_space(regs, size);
     self.materialize_cont(space);
-    self.code.push(Instr::HoleForward { hole: closure, space, len: size });
+    self.emit_forward(closure, space, size);
     self.suspend();
-    let resume = self.label();
-    set_target(&mut self.code[branch], 0, resume);
 
     let mut offset = 0;
     for (local, words) in env {
@@ -2189,7 +2186,7 @@ impl UnitBuilder<'_, '_> {
         EnvWords::Held => {
           let (reg, len) = self.local_regs(local);
           self.hold_regs(src, (0..len).map(|i| reg.offset(i)).collect());
-          self.future_holes.insert(src);
+          self.future_holders.insert(src);
           self.locals[local] = LocalState::Valid;
         }
         EnvWords::Space => self.at_end.push((local, AtEnd::Write(src))),
@@ -2224,7 +2221,7 @@ impl UnitBuilder<'_, '_> {
         self.duplicate(reg, len, copy);
       }
       Some(Intrinsic::Erase | Intrinsic::Forget | Intrinsic::F64Drop) => {
-        // Holes holding the value are still read, to free them.
+        // Frames holding the value are still read, to free them.
         if let [CallArg::Regs(reg, len)] = args[..] {
           self.discard_held(reg, len);
         }
@@ -2652,58 +2649,58 @@ impl UnitBuilder<'_, '_> {
           self.write_value(ret, out, 1);
         }
       }
-      HoleNew => {
+      FrameNew => {
         let ty = self.port_info(ret).ty;
-        let size = self.hole_value_size(ty);
+        let size = self.frame_value_size(ty);
         let reg = self.alloc(2);
-        self.code.push(Instr::HoleNew { dst: reg, len: size });
+        self.code.push(Instr::NewFrameWithoutCode { dst: reg, size: size + 1 });
         self.code.push(Instr::Space { dst: reg.offset(1), frame: reg, offset: 1 });
         self.write_value(ret, reg, 2);
       }
-      HoleOf => {
+      FrameOf => {
         let (value, len) = self.read_value(&args[0]);
         self.require(value, len);
         let reg = self.alloc(1);
-        self.code.push(Instr::HoleOf { dst: reg, src: value, len });
+        self.emit_holder_of(reg, value, len);
         self.write_value(ret, reg, 1);
       }
-      HoleGet => {
-        let (hole, _) = self.read_value(&args[0]);
-        self.require(hole, 1);
+      FrameGet => {
+        let (holder, _) = self.read_value(&args[0]);
+        self.require(holder, 1);
         let info = self.port_info(ret);
         let len = info.layout.size;
         if !self.wires.contains_key(&info.key.unwrap()) {
-          // The value is held by the hole itself.
+          // The value is held by the holder itself.
           let out = self.alloc(len);
-          self.hold_regs(hole, (0..len).map(|i| out.offset(i)).collect());
+          self.hold_regs(holder, (0..len).map(|i| out.offset(i)).collect());
           self.write_value(ret, out, len);
         } else {
           let space = self.wire_space(ret);
           self.materialize(space);
-          self.code.push(Instr::HoleForward { hole, space, len });
+          self.emit_forward(holder, space, len);
         }
       }
-      HoleForward => {
-        let (hole, _) = self.read_value(&args[0]);
-        self.require(hole, 1);
+      FrameForward => {
+        let (holder, _) = self.read_value(&args[0]);
+        self.require(holder, 1);
         let len = self.port_info(&args[1]).layout.size;
         let space = self.wire_space(&args[1]);
         self.materialize(space);
-        self.code.push(Instr::HoleForward { hole, space, len });
+        self.emit_forward(holder, space, len);
       }
-      HoleAsRef => {
-        // `as_ref(&Hole[T]) -> &T`; the value is borrowed from the hole, and
-        // put into a new hole once the borrow ends, which replaces the old one.
-        let (hole, hole_space) = self.read_ref(&args[0]);
-        self.require(hole.0, 1);
+      FrameAsRef => {
+        // `as_ref(&Frame[T]) -> &T`; the value is borrowed from the holder, and
+        // put into a new holder once the borrow ends, which replaces the old one.
+        let (holder, holder_space) = self.read_ref(&args[0]);
+        self.require(holder.0, 1);
         let size = self.port_info(ret).layout.size;
         let len = size - 1;
         let out = self.alloc(size);
-        self.hold_regs(hole.0, (0..len).map(|i| out.offset(i)).collect());
+        self.hold_regs(holder.0, (0..len).map(|i| out.offset(i)).collect());
         let new = self.alloc(1);
-        self.code.push(Instr::HoleNew { dst: new, len });
+        self.code.push(Instr::NewFrameWithoutCode { dst: new, size: len + 1 });
         self.code.push(Instr::Space { dst: out.offset(len), frame: new, offset: 1 });
-        self.write_back(hole_space, (new, 1));
+        self.write_back(holder_space, (new, 1));
         self.write_value(ret, out, size);
       }
       _ => {
@@ -2757,8 +2754,8 @@ impl UnitBuilder<'_, '_> {
     unreachable!()
   }
 
-  /// Builds a `List`, `(len, Hole[Stream], ~Stream)`, from its parts; a
-  /// `Stream` node is a value, followed by a `Hole` for the rest of the
+  /// Builds a `List`, `(len, Frame[Stream], ~Stream)`, from its parts; a
+  /// `Stream` node is a value, followed by a `Frame` for the rest of the
   /// stream.
   fn build_list(&mut self, element_size: u32, parts: Vec<ListPart>) -> Reg {
     // Wait for the parts first, as registers allocated below are not
@@ -2774,7 +2771,7 @@ impl UnitBuilder<'_, '_> {
     let list = self.alloc(3);
     let mut count = 0;
     let mut lists = Vec::new();
-    self.code.push(Instr::HoleNew { dst: list.offset(1), len: node_size });
+    self.code.push(Instr::NewFrameWithoutCode { dst: list.offset(1), size: node_size + 1 });
     let mut tail = self.alloc(1);
     self.code.push(Instr::Space { dst: tail, frame: list.offset(1), offset: 1 });
     for part in parts {
@@ -2787,7 +2784,10 @@ impl UnitBuilder<'_, '_> {
             ListPart::Word(w) => self.code.push(Instr::Const { dst: node, value: w as u64 }),
             ListPart::List(_) => unreachable!(),
           }
-          self.code.push(Instr::HoleNew { dst: node.offset(element_size), len: node_size });
+          self.code.push(Instr::NewFrameWithoutCode {
+            dst: node.offset(element_size),
+            size: node_size + 1,
+          });
           self.emit_write(tail, node, node_size);
           tail = self.alloc(1);
           self.code.push(Instr::Space { dst: tail, frame: node.offset(element_size), offset: 1 });
@@ -2796,7 +2796,7 @@ impl UnitBuilder<'_, '_> {
         ListPart::List(other) => {
           // Splice in another list: forward its front into the tail, and
           // continue from its back.
-          self.code.push(Instr::HoleForward { hole: other.offset(1), space: tail, len: node_size });
+          self.emit_forward(other.offset(1), tail, node_size);
           lists.push(other);
           tail = other.offset(2);
         }
@@ -2813,8 +2813,8 @@ impl UnitBuilder<'_, '_> {
     list
   }
 
-  fn hole_value_size(&mut self, ty: Type) -> u32 {
-    // `(Hole[T], ~T)`
+  fn frame_value_size(&mut self, ty: Type) -> u32 {
+    // `(Frame[T], ~T)`
     if let Some((_, TypeKind::Tuple(tys))) = self.vir.types.kind(ty)
       && let Some((_, TypeKind::Opaque(_, params))) = self.vir.types.kind(tys[0])
     {
@@ -3023,52 +3023,53 @@ impl UnitBuilder<'_, '_> {
     }
   }
 
-  /// Boxes a value: a box is a hole holding its contents.
+  /// Boxes a value: a box is a holder holding its contents.
   fn emit_box(&mut self, writer: &Port, reader: &Port) {
     let info = self.port_info(reader);
     let len = info.layout.size;
-    let hole = match info.key {
+    let holder = match info.key {
       Some(key) if len != 0 && !self.wires.contains_key(&key) => {
-        // The contents are produced later; they are written into the hole.
-        let hole = self.alloc(1);
-        self.code.push(Instr::HoleNew { dst: hole, len });
+        // The contents are produced later; they are written into the holder.
+        let holder = self.alloc(1);
+        self.code.push(Instr::NewFrameWithoutCode { dst: holder, size: len + 1 });
         let space = self.alloc(1);
-        self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
+        self.code.push(Instr::Space { dst: space, frame: holder, offset: 1 });
         self.wire_reader_space(reader, space);
-        hole
+        holder
       }
       _ => {
         let (reg, len) = self.read_value(reader);
-        self.hole_holding(reg, len)
+        self.holder_for(reg, len)
       }
     };
-    self.write_value(writer, hole, 1);
+    self.write_value(writer, holder, 1);
   }
 
-  /// Unboxes a value; the contents are held by the box's hole.
+  /// Unboxes a value; the contents are held by the box's holder.
   fn emit_unbox(&mut self, writer: &Port, reader: &Port) {
     let (handle, _) = self.read_value(reader);
     let len = self.port_info(writer).layout.size;
     let out = self.alloc(len);
-    let hole = if self.remote(handle, 1) {
+    let holder = if self.remote(handle, 1) {
       // The box is not available yet; a task forwards its contents into a
-      // new hole once it is.
-      let hole = self.alloc(1);
-      self.code.push(Instr::HoleNew { dst: hole, len });
+      // new holder once it is.
+      let holder = self.alloc(1);
+      self.code.push(Instr::NewFrameWithoutCode { dst: holder, size: len + 1 });
       let space = self.alloc(1);
-      self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
+      self.code.push(Instr::Space { dst: space, frame: holder, offset: 1 });
       let mut task = self.new_task();
       let handle = self.task_input(&mut task, handle, 1);
       let space = self.task_input(&mut task, space, 1);
-      task.code.push(Instr::HoleForward { hole: handle, space, len });
+      let forward = self.forward(handle, space, len);
+      task.code.extend(forward);
       self.finish_task(task);
-      hole
+      holder
     } else {
       handle
     };
-    self.hold_regs(hole, (0..len).map(|i| out.offset(i)).collect());
+    self.hold_regs(holder, (0..len).map(|i| out.offset(i)).collect());
     if len == 0 {
-      self.discard_held_hole(hole, 0);
+      self.discard_holder(holder, 0);
     }
     self.write_value(writer, out, len);
   }
@@ -3251,7 +3252,7 @@ impl UnitBuilder<'_, '_> {
       }
       Some(WireState::Discard) => {
         self.wires.insert(key, WireState::Consumed);
-        // Holes holding the value are still read, to free them.
+        // Frames holding the value are still read, to free them.
         self.discard_held(reg, len);
       }
       Some(state) => {
@@ -3275,7 +3276,7 @@ impl UnitBuilder<'_, '_> {
         let space = self.pending_space(reg, len);
         if self.awaited_by_transfer(key.1, self.step) {
           // The next transfer waits for it anyway, so it arrives where the
-          // transfer waits, rather than in a hole.
+          // transfer waits, rather than in a holder.
           self.materialize_cont(space);
         } else if let Some(reader) = self.strict_reader(key.1, self.step) {
           // The step reading it will be emitted into a task; the value is
@@ -3383,42 +3384,67 @@ impl UnitBuilder<'_, '_> {
   }
 
   /// Makes a virtual space real, as it escapes the unit: its value is held by a
-  /// hole, so that only code which reads it waits for it.
+  /// holder, so that only code which reads it waits for it.
   fn materialize(&mut self, space: Reg) {
     if self.virtual_spaces.contains_key(&space) {
       self.hold(space);
     }
   }
 
-  /// Makes a virtual space real, pointing into a new hole, which holds its
+  /// Makes a virtual space real, pointing into a new holder, which holds its
   /// value.
   fn hold(&mut self, space: Reg) -> Reg {
     let targets = self.virtual_spaces.remove(&space).unwrap();
     for target in &targets {
       self.unwritten.remove(target);
     }
-    let hole = self.alloc(1);
-    self.code.push(Instr::HoleNew { dst: hole, len: targets.len() as u32 });
-    self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
-    self.hold_regs(hole, targets);
-    hole
+    let holder = self.alloc(1);
+    self.code.push(Instr::NewFrameWithoutCode { dst: holder, size: targets.len() as u32 + 1 });
+    self.code.push(Instr::Space { dst: space, frame: holder, offset: 1 });
+    self.hold_regs(holder, targets);
+    holder
   }
 
-  /// Records that the hole in `hole` holds the values of `targets`.
-  fn hold_regs(&mut self, hole: Reg, targets: Vec<Reg>) {
+  /// Creates a frame holding the value in `src` of `len` words, in `dst`.
+  ///
+  /// A frame holding a value has no code until the value's reader supplies
+  /// it; it has a word after the value, for the space the reader forwards the
+  /// value into (see `forward`).
+  fn emit_holder_of(&mut self, dst: Reg, src: Reg, len: u32) {
+    self.code.push(Instr::NewFrameWithoutCode { dst, size: len + 1 });
+    self.code.push(Instr::Fill { frame: dst, offset: 1, src, len });
+  }
+
+  /// Supplies the code of the frame in `holder`, which holds a value of `len`
+  /// words: once the value has arrived, it is forwarded into `space`.
+  fn forward(&mut self, holder: Reg, space: Reg, len: u32) -> [Instr; 2] {
+    let block = self.e.forward_block(len);
+    [
+      Instr::Fill { frame: holder, offset: len + 1, src: space, len: 1 },
+      Instr::SetCode { frame: holder, block },
+    ]
+  }
+
+  fn emit_forward(&mut self, holder: Reg, space: Reg, len: u32) {
+    let forward = self.forward(holder, space, len);
+    self.code.extend(forward);
+  }
+
+  /// Records that the holder in `holder` holds the values of `targets`.
+  fn hold_regs(&mut self, holder: Reg, targets: Vec<Reg>) {
     for (i, &target) in targets.iter().enumerate() {
-      self.held.insert(target, (hole, i));
+      self.held.insert(target, (holder, i));
     }
-    self.holes.insert(hole, targets);
+    self.holders.insert(holder, targets);
   }
 
-  /// Reads the holes holding any of the given registers; their values will
+  /// Reads the holders holding any of the given registers; their values will
   /// arrive in the continuation frame.
   fn resolve(&mut self, reg: Reg, len: u32) {
     self.release(reg, len);
     for i in 0..len {
-      if let Some(&(hole, _)) = self.held.get(&reg.offset(i)) {
-        let targets = self.holes.remove(&hole).unwrap();
+      if let Some(&(holder, _)) = self.held.get(&reg.offset(i)) {
+        let targets = self.holders.remove(&holder).unwrap();
         for target in &targets {
           self.held.remove(target);
         }
@@ -3429,20 +3455,20 @@ impl UnitBuilder<'_, '_> {
         }
         self.virtual_spaces.insert(space, targets);
         self.materialize_cont(space);
-        self.code.push(Instr::HoleForward { hole, space, len });
+        self.emit_forward(holder, space, len);
       }
     }
   }
 
-  /// Returns a register holding a hole which holds the values of the given
+  /// Returns a register holding a holder which holds the values of the given
   /// registers.
-  fn hole_holding(&mut self, reg: Reg, len: u32) -> Reg {
-    self.align_holes(reg, len);
+  fn holder_for(&mut self, reg: Reg, len: u32) -> Reg {
+    self.align_holders(reg, len);
     match self.runs(reg, len)[..] {
       [] => {
-        let hole = self.alloc(1);
-        self.code.push(Instr::HoleOf { dst: hole, src: reg, len: 0 });
-        hole
+        let holder = self.alloc(1);
+        self.emit_holder_of(holder, reg, 0);
+        holder
       }
       [(0, run_len, Run::Held)] if run_len == len => self.take_held(reg, len),
       [(0, run_len, Run::Task(_))] if run_len == len => {
@@ -3456,19 +3482,19 @@ impl UnitBuilder<'_, '_> {
       }
       [(0, _, Run::Real)] if !self.remote(reg, len) => {
         self.materialize_range(reg, len);
-        let hole = self.alloc(1);
-        self.code.push(Instr::HoleOf { dst: hole, src: reg, len });
-        hole
+        let holder = self.alloc(1);
+        self.emit_holder_of(holder, reg, len);
+        holder
       }
       _ => {
         // Parts of the value are not available yet; they are written into the
-        // hole once they are.
-        let hole = self.alloc(1);
-        self.code.push(Instr::HoleNew { dst: hole, len });
+        // holder once they are.
+        let holder = self.alloc(1);
+        self.code.push(Instr::NewFrameWithoutCode { dst: holder, size: len + 1 });
         let space = self.alloc(1);
-        self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
+        self.code.push(Instr::Space { dst: space, frame: holder, offset: 1 });
         self.emit_write(space, reg, len);
-        hole
+        holder
       }
     }
   }
@@ -3483,12 +3509,12 @@ impl UnitBuilder<'_, '_> {
     })
   }
 
-  /// Splits the holes holding some of the given registers, and some other
-  /// registers, so that each hole holds either only registers within the
-  /// range, or none; e.g. when a field of a value held by a hole is passed on
-  /// separately. A task receives the hole's value, and writes its parts into
-  /// new holes.
-  fn align_holes(&mut self, reg: Reg, len: u32) {
+  /// Splits the holders holding some of the given registers, and some other
+  /// registers, so that each holder holds either only registers within the
+  /// range, or none; e.g. when a field of a value held by a holder is passed on
+  /// separately. A task receives the holder's value, and writes its parts into
+  /// new holders.
+  fn align_holders(&mut self, reg: Reg, len: u32) {
     let inside = |r: Reg| r >= reg && r < reg.offset(len);
     // A virtual space for only part of the range, or for registers outside of
     // it, is made real first.
@@ -3505,8 +3531,8 @@ impl UnitBuilder<'_, '_> {
       }
     }
     for i in 0..len {
-      let Some(&(hole, _)) = self.held.get(&reg.offset(i)) else { continue };
-      let targets = self.holes[&hole].clone();
+      let Some(&(holder, _)) = self.held.get(&reg.offset(i)) else { continue };
+      let targets = self.holders[&holder].clone();
       let mut groups: Vec<Vec<Reg>> = Vec::new();
       for &target in &targets {
         match groups.last_mut() {
@@ -3522,7 +3548,7 @@ impl UnitBuilder<'_, '_> {
       if groups.len() == 1 {
         continue;
       }
-      self.holes.remove(&hole);
+      self.holders.remove(&holder);
       for target in &targets {
         self.held.remove(target);
       }
@@ -3530,7 +3556,7 @@ impl UnitBuilder<'_, '_> {
       let value = self.alloc(targets.len() as u32);
       let space = self.alloc(1);
       self.code.push(Instr::Space { dst: space, frame: task.frame, offset: 1 });
-      self.code.push(Instr::HoleForward { hole, space, len: targets.len() as u32 });
+      self.emit_forward(holder, space, targets.len() as u32);
       task.map.extend((0..targets.len() as u32).map(|i| value.offset(i)));
       let mut offset = 0;
       for group in groups {
@@ -3564,7 +3590,7 @@ impl UnitBuilder<'_, '_> {
 
   /// Passes a space to a task, through which it writes the value of the given
   /// registers; returns the register the space is loaded into. The registers'
-  /// values are held by a hole until then.
+  /// values are held by a holder until then.
   fn task_output(&mut self, task: &mut Task, reg: Reg, len: u32) -> Reg {
     let space = self.pending_space(reg, len);
     self.task_input(task, space, 1)
@@ -3711,8 +3737,8 @@ impl UnitBuilder<'_, '_> {
         }
         let space = self.wire_space(port);
         if self.open_tasks[task].future && self.virtual_spaces.contains_key(&space) {
-          let hole = self.hold(space);
-          self.future_holes.insert(hole);
+          let holder = self.hold(space);
+          self.future_holders.insert(holder);
         }
         let reg = self.open_task_input(task, space, 1);
         flow.wires.insert(key, WireState::ReaderSpace(reg));
@@ -3786,7 +3812,7 @@ impl UnitBuilder<'_, '_> {
       return self.task_regs(task, reg, len, true);
     }
     let dst = self.alloc(len);
-    self.align_holes(reg, len);
+    self.align_holders(reg, len);
     for (start, run_len, kind) in self.runs(reg, len) {
       let (src, dst) = (reg.offset(start), dst.offset(start));
       if kind == Run::Task(task) {
@@ -3825,11 +3851,11 @@ impl UnitBuilder<'_, '_> {
           | IoReadChar
           | IoReadByte
           | IoReady
-          | HoleNew
-          | HoleOf
-          | HoleGet
-          | HoleForward
-          | HoleAsRef
+          | FrameNew
+          | FrameOf
+          | FrameGet
+          | FrameForward
+          | FrameAsRef
       )
     })
   }
@@ -3846,7 +3872,7 @@ impl UnitBuilder<'_, '_> {
     swap(&mut self.virtual_spaces, &mut flow.virtual_spaces);
     swap(&mut self.unwritten, &mut flow.unwritten);
     swap(&mut self.held, &mut flow.held);
-    swap(&mut self.holes, &mut flow.holes);
+    swap(&mut self.holders, &mut flow.holders);
     swap(&mut self.in_task, &mut flow.in_task);
     swap(&mut self.temps, &mut flow.temps);
   }
@@ -3879,14 +3905,14 @@ impl UnitBuilder<'_, '_> {
     true
   }
 
-  /// Frees the holes holding any of the given registers, discarding their
+  /// Frees the holders holding any of the given registers, discarding their
   /// values once they arrive.
   fn discard_held(&mut self, reg: Reg, len: u32) {
     // Values computed by tasks are simply not used.
     for i in 0..len {
       self.in_task.remove(&reg.offset(i));
     }
-    self.align_holes(reg, len);
+    self.align_holders(reg, len);
     // Values which will be written through virtual spaces are held, so that
     // they are freed too.
     for i in 0..len {
@@ -3895,21 +3921,21 @@ impl UnitBuilder<'_, '_> {
       }
     }
     for i in 0..len {
-      if let Some(&(hole, _)) = self.held.get(&reg.offset(i)) {
-        let targets = self.holes.remove(&hole).unwrap();
+      if let Some(&(holder, _)) = self.held.get(&reg.offset(i)) {
+        let targets = self.holders.remove(&holder).unwrap();
         for target in &targets {
           self.held.remove(target);
         }
-        self.discard_held_hole(hole, targets.len() as u32);
+        self.discard_holder(holder, targets.len() as u32);
       }
     }
   }
 
-  /// Frees a hole, discarding its value of `len` words once it arrives.
-  fn discard_held_hole(&mut self, hole: Reg, len: u32) {
-    self.holes.remove(&hole);
+  /// Frees a holder, discarding its value of `len` words once it arrives.
+  fn discard_holder(&mut self, holder: Reg, len: u32) {
+    self.holders.remove(&holder);
     let space = self.null_space();
-    self.code.push(Instr::HoleForward { hole, space, len });
+    self.emit_forward(holder, space, len);
   }
 
   /// Returns a space which discards what is written into it.
@@ -4035,7 +4061,7 @@ impl UnitBuilder<'_, '_> {
     // Parts of the value which will themselves be written through virtual
     // spaces are written directly into the corresponding parts of `space`:
     // the virtual spaces become spaces for those parts.
-    self.align_holes(src, len);
+    self.align_holders(src, len);
     let runs = self.runs(src, len);
     if runs.iter().all(|run| run.2 == Run::Real) {
       self.materialize_range(src, len);
@@ -4069,8 +4095,8 @@ impl UnitBuilder<'_, '_> {
           self.code.push(Instr::Move { dst: virtual_space, src: part, len: 1 });
         }
         Run::Held => {
-          let hole = self.take_held(src, len);
-          self.code.push(Instr::HoleForward { hole, space: part, len });
+          let holder = self.take_held(src, len);
+          self.emit_forward(holder, part, len);
         }
         Run::Task(task) => self.task_write(task, part, src, len),
         Run::Real => self.code.push(Instr::Write { space: part, src, len }),
@@ -4088,18 +4114,18 @@ impl UnitBuilder<'_, '_> {
     space
   }
 
-  /// Removes the hole the registers are held by.
+  /// Removes the holder the registers are held by.
   fn take_held(&mut self, src: Reg, len: u32) -> Reg {
-    let (hole, _) = self.held[&src];
+    let (holder, _) = self.held[&src];
     for j in 0..len {
       self.held.remove(&src.offset(j));
     }
-    self.holes.remove(&hole);
-    hole
+    self.holders.remove(&holder);
+    holder
   }
 
   /// Splits registers into runs, each either written through one virtual
-  /// space, held by one hole, or neither; returns their starts, lengths, and
+  /// space, held by one holder, or neither; returns their starts, lengths, and
   /// kinds.
   fn runs(&self, src: Reg, len: u32) -> Vec<(u32, u32, Run)> {
     let mut runs = Vec::new();
@@ -4130,8 +4156,8 @@ impl UnitBuilder<'_, '_> {
       }
       return Some((len, Run::Task(task)));
     }
-    let &(hole, 0) = self.held.get(&reg)? else { return None };
-    let targets = &self.holes[&hole];
+    let &(holder, 0) = self.held.get(&reg)? else { return None };
+    let targets = &self.holders[&holder];
     let len = targets.len() as u32;
     (len <= max && (0..len).all(|i| targets[i as usize] == reg.offset(i)))
       .then_some((len, Run::Held))
@@ -4141,7 +4167,7 @@ impl UnitBuilder<'_, '_> {
   /// a virtual space are written into the frame directly: the virtual space
   /// becomes a space pointing into it.
   fn emit_fill(&mut self, frame: Reg, offset: u32, src: Reg, len: u32) {
-    self.align_holes(src, len);
+    self.align_holders(src, len);
     for (start, len, kind) in self.runs(src, len) {
       let (src, offset) = (src.offset(start), offset + start);
       match kind {
@@ -4150,10 +4176,10 @@ impl UnitBuilder<'_, '_> {
           self.code.push(Instr::Space { dst: space, frame, offset });
         }
         Run::Held => {
-          let hole = self.take_held(src, len);
+          let holder = self.take_held(src, len);
           let space = self.alloc(1);
           self.code.push(Instr::Space { dst: space, frame, offset });
-          self.code.push(Instr::HoleForward { hole, space, len });
+          self.emit_forward(holder, space, len);
         }
         Run::Task(task) => {
           let space = self.alloc(1);
@@ -4181,7 +4207,7 @@ impl UnitBuilder<'_, '_> {
   /// Like `require`, but allows registers to be written through virtual
   /// spaces, if they are filled into a frame with `emit_fill`.
   fn require_filled(&mut self, reg: Reg, len: u32) {
-    self.align_holes(reg, len);
+    self.align_holders(reg, len);
     for (start, len, kind) in self.runs(reg, len) {
       if kind == Run::Real {
         self.require(reg.offset(start), len);
@@ -4203,9 +4229,9 @@ impl UnitBuilder<'_, '_> {
       } else if let Some((space, index)) = self.unwritten.remove(&s) {
         self.virtual_spaces.get_mut(&space).unwrap()[index] = d;
         self.unwritten.insert(d, (space, index));
-      } else if let Some((hole, index)) = self.held.remove(&s) {
-        self.holes.get_mut(&hole).unwrap()[index] = d;
-        self.held.insert(d, (hole, index));
+      } else if let Some((holder, index)) = self.held.remove(&s) {
+        self.holders.get_mut(&holder).unwrap()[index] = d;
+        self.held.insert(d, (holder, index));
       } else if let Some(entry) = self.in_task.remove(&s) {
         self.in_task.insert(d, entry);
       } else if let Some(targets) = self.virtual_spaces.remove(&s) {
@@ -4276,7 +4302,7 @@ impl UnitBuilder<'_, '_> {
   }
 
   /// Finishes the open tasks, as the block filling their frames ends; values
-  /// they compute which are still used are held by holes.
+  /// they compute which are still used are held by holders.
   fn close_tasks(&mut self) {
     if self.open_tasks.is_empty() {
       return;
@@ -4291,7 +4317,7 @@ impl UnitBuilder<'_, '_> {
     }
   }
 
-  /// Makes values computed by open tasks held by holes, which the tasks write
+  /// Makes values computed by open tasks held by holders, which the tasks write
   /// them into.
   fn release(&mut self, reg: Reg, len: u32) {
     let mut i = 0;
@@ -4301,14 +4327,14 @@ impl UnitBuilder<'_, '_> {
         continue;
       };
       let src = reg.offset(i);
-      let hole = self.alloc(1);
-      self.code.push(Instr::HoleNew { dst: hole, len });
+      let holder = self.alloc(1);
+      self.code.push(Instr::NewFrameWithoutCode { dst: holder, size: len + 1 });
       let space = self.alloc(1);
-      self.code.push(Instr::Space { dst: space, frame: hole, offset: 1 });
+      self.code.push(Instr::Space { dst: space, frame: holder, offset: 1 });
       self.task_write(task, space, src, len);
-      self.hold_regs(hole, (0..len).map(|j| src.offset(j)).collect());
+      self.hold_regs(holder, (0..len).map(|j| src.offset(j)).collect());
       if self.open_tasks[task].future {
-        self.future_holes.insert(hole);
+        self.future_holders.insert(holder);
       }
       i += len;
     }
@@ -4373,14 +4399,14 @@ impl UnitBuilder<'_, '_> {
 
   /// The registers whose values must be preserved to preserve the given
   /// registers: registers written through virtual spaces need not be
-  /// preserved, and held registers are preserved by preserving their holes.
+  /// preserved, and held registers are preserved by preserving their holders.
   fn live_regs(&self, regs: Vec<(Reg, u32)>) -> Vec<(Reg, u32)> {
     let mut live = Vec::new();
     for (reg, len) in regs {
       for i in 0..len {
         let r = reg.offset(i);
-        if let Some(&(hole, _)) = self.held.get(&r) {
-          live.push((hole, 1));
+        if let Some(&(holder, _)) = self.held.get(&r) {
+          live.push((holder, 1));
         } else if !self.unwritten.contains_key(&r) && !self.virtual_spaces.contains_key(&r) {
           live.push((r, 1));
         }
@@ -4447,7 +4473,7 @@ enum Run {
 enum AtEnd {
   /// It is written into this space.
   Write(Reg),
-  /// It is a space, which this hole's value (of the given size) is forwarded
+  /// It is a space, which this holder's value (of the given size) is forwarded
   /// into.
   Forward(Reg, u32),
 }
@@ -4463,7 +4489,7 @@ impl AtEnd {
 #[derive(Debug, Clone, Copy)]
 enum EnvWords {
   Value(u32),
-  /// A hole holding the value.
+  /// A holder holding the value.
   Held,
   Space,
 }
@@ -4496,7 +4522,7 @@ fn moves_data(step: &Step) -> bool {
 fn reads_inputs(intrinsic: Intrinsic) -> bool {
   !matches!(
     intrinsic,
-    Intrinsic::HoleNew
+    Intrinsic::FrameNew
       | Intrinsic::Erase
       | Intrinsic::Forget
       | Intrinsic::F64Drop

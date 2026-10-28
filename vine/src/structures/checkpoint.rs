@@ -238,7 +238,7 @@ impl Builtins {
       nat,
       char,
       io,
-      hole,
+      frame,
       box_,
       list,
       string,
@@ -289,7 +289,7 @@ impl Builtins {
     revert_idx(nat, checkpoint.structs);
     revert_idx(char, checkpoint.opaque_types);
     revert_idx(io, checkpoint.opaque_types);
-    revert_idx(hole, checkpoint.opaque_types);
+    revert_idx(frame, checkpoint.opaque_types);
     revert_idx(box_, checkpoint.structs);
     revert_idx(list, checkpoint.structs);
     revert_idx(string, checkpoint.structs);
